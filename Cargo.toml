@@ -1,0 +1,21 @@
+[package]
+name = "tokio-nbd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bitflags = "2.9.1"
+futures = "0.3.31"
+int-enum = "1.2.0"
+thiserror = "2.0.12"
+tokio = { version = "1.46.1", default-features = false, features = [
+    "io-util",
+    "net",
+] }
+
+
+[dev-dependencies]
+tokio = { version = "1.46.1", default-features = false, features = [
+    "macros",
+    "test-util",
+] }
