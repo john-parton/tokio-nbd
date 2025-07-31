@@ -1,26 +1,23 @@
-name: Cargo Build & Test
-
 on:
   push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
+    # Pattern matched against refs/tags
+    tags:
+      - "v*" # Push events to every tag that starts with "v"
+  workflow_dispatch:
 
-env:
-  CARGO_TERM_COLOR: always
+name: Publish
 
 jobs:
-  build_and_test:
-    name: Rust project - latest
+  publish:
+    name: Publish
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        toolchain:
-          - stable
-          - beta
-          - nightly
     steps:
-      - uses: actions/checkout@v4
-      - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
-      - run: cargo build --verbose
-      - run: cargo test --verbose
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - run: cargo publish --token ${CRATES_TOKEN}
+        env:
+          CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
