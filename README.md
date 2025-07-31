@@ -8,14 +8,15 @@ Network Block Device (NBD) server with pluggable backend support using Rust and 
 
 `tokio-nbd` is a Rust implementation of the Network Block Device (NBD) protocol that leverages the tokio asynchronous runtime. It provides a modern, high-performance, and extensible NBD server framework that can be used with various storage backends.
 
-The library implements the full NBD protocol specification as defined at [NetworkBlockDevice/nbd](https://github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md), including features like:
+The library implements the most of the NBD protocol specification as defined at [NetworkBlockDevice/nbd](https://github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md), including features like:
 
 - Newstyle negotiation
 - Export discovery
 - Read/write operations
 - Flush, FUA (Force Unit Access), and Trim commands
 - Write Zeroes optimization
-- Structured replies
+
+Structured replies are not implemented.
 
 ## Features
 
