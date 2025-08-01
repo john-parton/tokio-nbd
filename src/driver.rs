@@ -97,6 +97,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 
 use crate::command_request::CommandRequest;
+use crate::device::NbdDevice;
 use crate::errors::{OptionReplyError, ProtocolError};
 use crate::flags::{CommandFlags, HandshakeFlags, ServerFeatures, TransmissionFlags};
 use crate::io::command_reply::SimpleReplyRaw;
@@ -205,13 +206,8 @@ use std::future::Future;
 ///     // Other methods implementation...
 /// }
 /// ```
-pub trait NBDDriver {
-    /// Returns the features supported by this driver implementation.
-    ///
-    /// This method should return a combination of `ServerFeatures` flags
-    /// that indicate which NBD protocol features are supported by this driver.
-    /// These features will be advertised to clients during the negotiation phase.
-    fn get_features(&self) -> ServerFeatures;
+pub trait NBDDriver<T: NbdDevice> {
+    fn get_device(&self, device_name: &str) -> Option<T>;
 
     /// Returns a list of available devices provided by this driver.
     ///
@@ -219,73 +215,6 @@ pub trait NBDDriver {
     /// - `Ok(Vec<String>)`: A list of device names that can be exported
     /// - `Err(OptionReplyError)`: If an error occurs while retrieving the device list
     fn list_devices(&self) -> impl Future<Output = Result<Vec<String>, OptionReplyError>>;
-
-    /// Checks if a device is read-only.
-    ///
-    /// # Parameters
-    /// - `device_name`: The name of the device to check
-    ///
-    /// # Returns
-    /// - `Ok(bool)`: `true` if the device is read-only, `false` otherwise
-    /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_read_only(
-        &self,
-        device_name: &str,
-    ) -> impl Future<Output = Result<bool, OptionReplyError>>;
-
-    /// Returns the block size information for a device.
-    ///
-    /// # Parameters
-    /// - `device_name`: The name of the device to query
-    ///
-    /// # Returns
-    /// - `Ok((min_block_size, preferred_block_size, max_block_size))`: Block size constraints for the device
-    /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_block_size(
-        &self,
-        device_name: &str,
-    ) -> impl Future<Output = Result<(u32, u32, u32), OptionReplyError>>;
-
-    /// Returns the canonical name of a device.
-    ///
-    /// The canonical name may differ from the requested name if aliases are supported.
-    ///
-    /// # Parameters
-    /// - `device_name`: The name or alias of the device
-    ///
-    /// # Returns
-    /// - `Ok(String)`: The canonical device name
-    /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_canonical_name(
-        &self,
-        device_name: &str,
-    ) -> impl Future<Output = Result<String, OptionReplyError>>;
-
-    /// Returns a human-readable description of the device.
-    ///
-    /// # Parameters
-    /// - `device_name`: The name of the device
-    ///
-    /// # Returns
-    /// - `Ok(String)`: The device description
-    /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_description(
-        &self,
-        device_name: &str,
-    ) -> impl Future<Output = Result<String, OptionReplyError>>;
-
-    /// Returns the size of a device in bytes.
-    ///
-    /// # Parameters
-    /// - `device_name`: The name of the device
-    ///
-    /// # Returns
-    /// - `Ok(u64)`: The device size in bytes
-    /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_device_size(
-        &self,
-        device_name: &str,
-    ) -> impl Future<Output = Result<u64, OptionReplyError>>;
 
     // ----- Core Data Operations -----
 
@@ -566,21 +495,31 @@ enum OptionReplyFinalize {
 /// # Type Parameters
 ///
 /// - `T`: A type that implements the `NBDDriver` trait
-pub struct NBDServer<T: NBDDriver> {
+pub struct NBDServer<T: NbdDevice> {
     /// The driver implementation for handling storage operations
-    driver: Arc<T>,
+    devices: Vec<T>,
 }
 
-impl<T: NBDDriver> NBDServer<T> {
-    /// Creates a new NBD server with the given driver.
+impl<T: NbdDevice> NBDServer<T> {
+    /// Creates a new NBD server with the given devices.
     ///
     /// # Parameters
-    /// - `driver`: The driver implementation to use for storage operations
+    /// - `devices`: The driver implementations to use for storage operations
     ///
     /// # Returns
     /// A new `NBDServer` instance
-    pub fn new(driver: Arc<T>) -> Self {
-        NBDServer { driver }
+    pub fn new(devices: Vec<T>) -> Self {
+        NBDServer { devices }
+    }
+
+    // Should be be sync or async
+    fn get_device(&self, device_name: &str) -> Option<&T> {
+        // If device name is blank, get the first device as "default"
+        if device_name.is_empty() {
+            return self.devices.first();
+        }
+
+        self.devices.iter().find(|d| d.get_name() == device_name)
     }
 
     /// Starts the NBD server on the given TCP stream.
@@ -763,6 +702,7 @@ impl<T: NBDDriver> NBDServer<T> {
             OptionRequest::ExtendedHeaders(_) => unimplemented!(),
             OptionRequest::ExportName(name) => {
                 // Is this really correct? No ack, just go right into transmission?
+                let device = self.get_device(&name);
                 return Ok((
                     vec![],
                     OptionReplyFinalize::End(SelectedDevice {
@@ -839,11 +779,7 @@ impl<T: NBDDriver> NBDServer<T> {
     /// - List available devices
     /// - Query device information (size, read-only status, etc.)
     /// - Select a device for the transmission phase
-    async fn handle_options<R, W>(
-        &self,
-        reader: &mut R,
-        writer: &mut W,
-    ) -> std::io::Result<SelectedDevice>
+    async fn handle_options<R, W>(&self, reader: &mut R, writer: &mut W) -> std::io::Result<T>
     where
         R: AsyncReadExt + Unpin,
         W: AsyncWrite + Unpin,
