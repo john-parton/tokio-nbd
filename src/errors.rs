@@ -151,7 +151,7 @@ pub enum OptionReplyError {
     ///
     /// Corresponds to NBD_REP_ERR_UNKNOWN (2^31 + 6).
     #[error("Unknown export (NBD_REP_ERR_UNKNOWN)")]
-    Unknown = 0x80000006,
+    UnknownExport = 0x80000006,
 
     /// The server is in the process of shutting down.
     ///

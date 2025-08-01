@@ -2,8 +2,8 @@
 //!
 //! This module provides the core components for implementing an NBD server:
 //!
-//! - [`NBDDriver`]: A trait for implementing storage backends
-//! - [`NBDServer`]: A server implementation that handles the NBD protocol
+//! - [`NbdDriver`]: A trait for implementing storage backends
+//! - [`NbdServer`]: A server implementation that handles the NBD protocol
 //!
 //! The NBD protocol enables remote access to block devices over a network connection.
 //! It consists of two phases:
@@ -16,12 +16,12 @@
 //!
 //! To create an NBD server:
 //!
-//! 1. Implement the [`NBDDriver`] trait for your storage backend
-//! 2. Create an instance of [`NBDServer`] with your driver
+//! 1. Implement the [`NbdDriver`] trait for your storage backend
+//! 2. Create an instance of [`NbdServer`] with your driver
 //! 3. Call `start()` with a TcpStream to begin serving
 //!
 //! ```rust,compile_fail
-//! use tokio_nbd::driver::{NBDDriver, NBDServer};
+//! use tokio_nbd::driver::{NbdDriver, NbdServer};
 //! use tokio_nbd::flags::ServerFeatures;
 //! use tokio_nbd::errors::{ProtocolError, OptionReplyError};
 //! use tokio::net::{TcpListener, TcpStream};
@@ -32,7 +32,7 @@
 //!     data: RwLock<Vec<u8>>,
 //! }
 //!
-//! // ... implement NBDDriver for MemoryDriver
+//! // ... implement NbdDriver for MemoryDriver
 //!
 //! async fn start_nbd(host: &str, port: u16, driver: Arc<MemoryDriver>) -> std::io::Result<()> {
 //!     let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
@@ -45,7 +45,7 @@
 //!         let driver = Arc::clone(&driver);
 //!
 //!         tokio::spawn(async move {
-//!             let server = NBDServer::new(driver);
+//!             let server = NbdServer::new(driver);
 //!
 //!             if let Err(e) = server.start(stream).await {
 //!                 println!("Error starting NBD server: {:?}", e);
@@ -114,7 +114,7 @@ use std::future::Future;
 /// This trait defines the interface that must be implemented to provide
 /// a functional NBD server. Implementors of this trait will handle the
 /// actual storage operations, while the NBD protocol handling is
-/// provided by the `NBDServer`.
+/// provided by the `NbdServer`.
 ///
 /// # Implementation Guidelines
 ///
@@ -143,7 +143,7 @@ use std::future::Future;
 /// Here's a simplified example of a memory-backed NBD driver:
 ///
 /// ```rust,compile_fail
-/// use tokio_nbd::driver::NBDDriver;
+/// use tokio_nbd::driver::NbdDriver;
 /// use tokio_nbd::flags::{ServerFeatures, CommandFlags};
 /// use tokio_nbd::errors::{ProtocolError, OptionReplyError};
 /// use std::sync::RwLock;
@@ -154,7 +154,7 @@ use std::future::Future;
 ///     data: RwLock<Vec<u8>>,
 /// }
 ///
-/// impl NBDDriver for MemoryDriver {
+/// impl NbdDriver for MemoryDriver {
 ///     fn get_features(&self) -> ServerFeatures {
 ///         // Support basic read/write operations but not advanced features
 ///         ServerFeatures::SEND_FLUSH | ServerFeatures::SEND_FUA
@@ -206,7 +206,7 @@ use std::future::Future;
 ///     // Other methods implementation...
 /// }
 /// ```
-pub trait NBDDriver<T: NbdDevice> {
+pub trait NbdDriver<T: NbdDevice> {
     fn get_device(&self, device_name: &str) -> Option<T>;
 
     /// Returns a list of available devices provided by this driver.
@@ -433,7 +433,7 @@ pub trait NBDDriver<T: NbdDevice> {
 ///
 /// ## Thread Safety
 ///
-/// Since the `NBDDriver` trait is used with a server that may handle multiple connections,
+/// Since the `NbdDriver` trait is used with a server that may handle multiple connections,
 /// implementations should be thread-safe. Consider using synchronization primitives like
 /// `Arc<Mutex<T>>`, `RwLock`, or other concurrency controls appropriate for your storage backend.
 
@@ -475,7 +475,7 @@ impl SelectedDevice {
 ///
 /// Used by the option handling code to determine what action to take
 /// after processing an option request.
-enum OptionReplyFinalize {
+enum OptionReplyFinalize<T> {
     /// Abort the negotiation (e.g., client sent an Abort request)
     Abort,
 
@@ -483,33 +483,35 @@ enum OptionReplyFinalize {
     Continue,
 
     /// End the negotiation and proceed to transmission phase
-    End(SelectedDevice),
+    End(T),
 }
 
 /// The main NBD server implementation.
 ///
 /// Handles the NBD protocol including handshake, option negotiation,
-/// and command processing. Uses a generic `NBDDriver` implementation to
+/// and command processing. Uses a generic `NbdDriver` implementation to
 /// perform the actual storage operations.
 ///
 /// # Type Parameters
 ///
-/// - `T`: A type that implements the `NBDDriver` trait
-pub struct NBDServer<T: NbdDevice> {
+/// - `T`: A type that implements the `NbdDriver` trait
+pub struct NbdServer<T: NbdDevice> {
     /// The driver implementation for handling storage operations
     devices: Vec<T>,
 }
 
-impl<T: NbdDevice> NBDServer<T> {
+impl<T: NbdDevice> NbdServer<T> {
     /// Creates a new NBD server with the given devices.
     ///
     /// # Parameters
     /// - `devices`: The driver implementations to use for storage operations
     ///
     /// # Returns
-    /// A new `NBDServer` instance
+    /// A new `NbdServer` instance
     pub fn new(devices: Vec<T>) -> Self {
-        NBDServer { devices }
+        // Initializing the server with zero length vec is an error, but not
+        // checked here. Check in 'start'
+        Self { devices }
     }
 
     // Should be be sync or async
@@ -540,6 +542,13 @@ impl<T: NbdDevice> NBDServer<T> {
     /// 2. Handle option negotiation to select a device
     /// 3. Process commands for the selected device
     pub async fn start(&self, stream: TcpStream) -> std::io::Result<()> {
+        if self.devices.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "No devices available for NBD server",
+            ));
+        }
+
         let (reader, writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
         let mut writer = BufWriter::new(writer);
@@ -649,7 +658,7 @@ impl<T: NbdDevice> NBDServer<T> {
     async fn handle_option_request(
         &self,
         request: &OptionRequest,
-    ) -> Result<(Vec<OptionReply>, OptionReplyFinalize), OptionReplyError> {
+    ) -> Result<(Vec<OptionReply>, OptionReplyFinalize<&T>), OptionReplyError> {
         let mut responses: Vec<OptionReply> = Vec::new();
 
         match request {
@@ -665,13 +674,14 @@ impl<T: NbdDevice> NBDServer<T> {
             }
             OptionRequest::StartTLS => unimplemented!(),
             OptionRequest::Info(name, _info_requests) | OptionRequest::Go(name, _info_requests) => {
-                let read_only = self.driver.get_read_only(name).await?;
-                let size = self.driver.get_device_size(name).await?;
+                let Some(device) = self.get_device(name) else {
+                    return Err(OptionReplyError::UnknownExport);
+                };
 
-                let mut flags: TransmissionFlags = self.driver.get_features().into();
+                let mut flags: TransmissionFlags = device.get_features().into();
 
                 // A separate method to make the driver API cleaner
-                if read_only {
+                if device.get_read_only(name).await? {
                     flags.insert(TransmissionFlags::READ_ONLY);
                 }
 
@@ -679,21 +689,21 @@ impl<T: NbdDevice> NBDServer<T> {
                 // The client may or may not honor it, but some don't request it at all and just move on
                 // We should probably store which information types were explicitly requested and
                 // expose that information to the driver
-                responses.push(OptionReply::Info(InfoPayload::Export(size, flags)));
+                responses.push(OptionReply::Info(InfoPayload::Export(
+                    device.get_device_size(name).await?,
+                    flags,
+                )));
                 responses.push(OptionReply::Info(InfoPayload::Name(name.clone())));
                 responses.push(OptionReply::Info(InfoPayload::Description(
-                    self.driver.get_description(name).await?,
+                    device.get_description(name).await?,
                 )));
-                let (min, optimal, max) = self.driver.get_block_size(name).await?;
+                let (min, optimal, max) = device.get_block_size(name).await?;
                 responses.push(OptionReply::Info(InfoPayload::BlockSize(min, optimal, max)));
 
                 responses.push(OptionReply::Ack);
 
                 if matches!(request, OptionRequest::Go(..)) {
-                    return Ok((
-                        responses,
-                        OptionReplyFinalize::End(SelectedDevice { read_only }),
-                    ));
+                    return Ok((responses, OptionReplyFinalize::End(device)));
                 }
             }
             OptionRequest::StructuredReply => unimplemented!(),
@@ -702,13 +712,10 @@ impl<T: NbdDevice> NBDServer<T> {
             OptionRequest::ExtendedHeaders(_) => unimplemented!(),
             OptionRequest::ExportName(name) => {
                 // Is this really correct? No ack, just go right into transmission?
-                let device = self.get_device(&name);
-                return Ok((
-                    vec![],
-                    OptionReplyFinalize::End(SelectedDevice {
-                        read_only: self.driver.get_read_only(name).await?,
-                    }),
-                ));
+                let device = self
+                    .get_device("")
+                    .expect("Default device should always exist");
+                return Ok((vec![], OptionReplyFinalize::End(device)));
             }
         }
         Ok((responses, OptionReplyFinalize::Continue))
@@ -873,7 +880,7 @@ impl<T: NbdDevice> NBDServer<T> {
     /// This continues until either the client disconnects or an error occurs.
     async fn handle_commands<R, W>(
         &self,
-        selected_device: &SelectedDevice,
+        selected_device: &T,
         reader: &mut R,
         writer: &mut W,
     ) -> io::Result<()>
@@ -917,40 +924,37 @@ impl<T: NbdDevice> NBDServer<T> {
                     // Disconnection is the only operation without a reply
                     // and a return early
                     CommandRequest::Disconnect => {
-                        self.driver
+                        selected_device
                             .disconnect(flags)
                             .await
                             .expect("Failed to disconnect");
                         return Ok(());
                     }
                     CommandRequest::Read(offset, length) => {
-                        self.driver.read(flags, offset, length).await
+                        selected_device.read(flags, offset, length).await
                     }
-                    CommandRequest::Write(offset, data) => {
-                        self.driver.write(flags, offset, data).await.map(|_| vec![])
-                    }
-                    CommandRequest::Flush => self.driver.flush(flags).await.map(|_| vec![]),
-                    CommandRequest::Trim(offset, length) => self
-                        .driver
+                    CommandRequest::Write(offset, data) => selected_device
+                        .write(flags, offset, data)
+                        .await
+                        .map(|_| vec![]),
+                    CommandRequest::Flush => selected_device.flush(flags).await.map(|_| vec![]),
+                    CommandRequest::Trim(offset, length) => selected_device
                         .trim(flags, offset, length)
                         .await
                         .map(|_| vec![]),
-                    CommandRequest::WriteZeroes(offset, length) => self
-                        .driver
+                    CommandRequest::WriteZeroes(offset, length) => selected_device
                         .write_zeroes(flags, offset, length)
                         .await
                         .map(|_| vec![]),
                     CommandRequest::Resize(size) => {
-                        self.driver.resize(flags, size).await.map(|_| vec![])
+                        selected_device.resize(flags, size).await.map(|_| vec![])
                     }
-                    CommandRequest::Cache(offset, length) => self
-                        .driver
+                    CommandRequest::Cache(offset, length) => selected_device
                         .cache(flags, offset, length)
                         .await
                         .map(|_| vec![]),
                     // Not implemented yet
-                    CommandRequest::BlockStatus(..) => self
-                        .driver
+                    CommandRequest::BlockStatus(..) => selected_device
                         .block_status(flags, command_raw.offset, command_raw.length)
                         .await
                         .map(|_| vec![]),
@@ -989,7 +993,7 @@ impl<T: NbdDevice> NBDServer<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::NBDDriver;
+    use super::NbdDriver;
     use crate::errors::{OptionReplyError, ProtocolError};
     use crate::flags::{CommandFlags, ServerFeatures};
 
@@ -1001,7 +1005,7 @@ mod tests {
         data: RwLock<Vec<u8>>,
     }
 
-    impl NBDDriver for MemoryDriver {
+    impl NbdDriver for MemoryDriver {
         fn get_features(&self) -> ServerFeatures {
             // Support basic read/write operations but not advanced features
             ServerFeatures::SEND_FLUSH | ServerFeatures::SEND_FUA

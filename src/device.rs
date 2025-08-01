@@ -2,8 +2,8 @@
 //!
 //! This module provides the core components for implementing an NBD server:
 //!
-//! - [`NBDDriver`]: A trait for implementing storage backends
-//! - [`NBDServer`]: A server implementation that handles the NBD protocol
+//! - [`NbdDriver`]: A trait for implementing storage backends
+//! - [`NbdServer`]: A server implementation that handles the NBD protocol
 //!
 //! The NBD protocol enables remote access to block devices over a network connection.
 //! It consists of two phases:
@@ -16,12 +16,12 @@
 //!
 //! To create an NBD server:
 //!
-//! 1. Implement the [`NBDDriver`] trait for your storage backend
-//! 2. Create an instance of [`NBDServer`] with your driver
+//! 1. Implement the [`NbdDriver`] trait for your storage backend
+//! 2. Create an instance of [`NbdServer`] with your driver
 //! 3. Call `start()` with a TcpStream to begin serving
 //!
 //! ```rust,compile_fail
-//! use tokio_nbd::driver::{NBDDriver, NBDServer};
+//! use tokio_nbd::driver::{NbdDriver, NbdServer};
 //! use tokio_nbd::flags::ServerFeatures;
 //! use tokio_nbd::errors::{ProtocolError, OptionReplyError};
 //! use tokio::net::{TcpListener, TcpStream};
@@ -32,7 +32,7 @@
 //!     data: RwLock<Vec<u8>>,
 //! }
 //!
-//! // ... implement NBDDriver for MemoryDriver
+//! // ... implement NbdDriver for MemoryDriver
 //!
 //! async fn start_nbd(host: &str, port: u16, driver: Arc<MemoryDriver>) -> std::io::Result<()> {
 //!     let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
@@ -45,7 +45,7 @@
 //!         let driver = Arc::clone(&driver);
 //!
 //!         tokio::spawn(async move {
-//!             let server = NBDServer::new(driver);
+//!             let server = NbdServer::new(driver);
 //!
 //!             if let Err(e) = server.start(stream).await {
 //!                 println!("Error starting NBD server: {:?}", e);
@@ -91,6 +91,7 @@
 //! - Use firewall rules to restrict access
 //!
 
+use crate::command_request::CommandRequest;
 use crate::errors::{OptionReplyError, ProtocolError};
 use crate::flags::{CommandFlags, ServerFeatures};
 
@@ -99,7 +100,7 @@ use crate::flags::{CommandFlags, ServerFeatures};
 /// This trait defines the interface that must be implemented to provide
 /// a functional NBD server. Implementors of this trait will handle the
 /// actual storage operations, while the NBD protocol handling is
-/// provided by the `NBDServer`.
+/// provided by the `NbdServer`.
 ///
 /// # Implementation Guidelines
 ///
@@ -128,7 +129,7 @@ use crate::flags::{CommandFlags, ServerFeatures};
 /// Here's a simplified example of a memory-backed NBD driver:
 ///
 /// ```rust,compile_fail
-/// use tokio_nbd::driver::NBDDriver;
+/// use tokio_nbd::driver::NbdDriver;
 /// use tokio_nbd::flags::{ServerFeatures, CommandFlags};
 /// use tokio_nbd::errors::{ProtocolError, OptionReplyError};
 /// use std::sync::RwLock;
@@ -139,7 +140,7 @@ use crate::flags::{CommandFlags, ServerFeatures};
 ///     data: RwLock<Vec<u8>>,
 /// }
 ///
-/// impl NBDDriver for MemoryDriver {
+/// impl NbdDriver for MemoryDriver {
 ///     fn get_features(&self) -> ServerFeatures {
 ///         // Support basic read/write operations but not advanced features
 ///         ServerFeatures::SEND_FLUSH | ServerFeatures::SEND_FUA
@@ -448,6 +449,18 @@ pub trait NbdDriver {
         offset: u64,
         length: u32,
     ) -> impl Future<Output = Result<(), ProtocolError>>;
+
+    fn is_command_permitted(&self, command: &CommandRequest) -> bool {
+        return !(self.read_only
+            && matches!(
+                command,
+                CommandRequest::Write(_, _)
+                    | CommandRequest::Flush
+                    | CommandRequest::Trim(_, _)
+                    | CommandRequest::WriteZeroes(_, _)
+                    | CommandRequest::Resize(_)
+            ));
+    }
 }
 
 #[cfg(test)]
