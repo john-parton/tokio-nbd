@@ -79,6 +79,19 @@ pub(crate) enum CommandRequest {
     BlockStatus(u64, u32),
 }
 
+impl CommandRequest {
+    pub(crate) fn is_write_command(&self) -> bool {
+        matches!(
+            self,
+            Self::Write(_, _)
+                | Self::Flush
+                | Self::Trim(_, _)
+                | Self::WriteZeroes(_, _)
+                | Self::Resize(_)
+        )
+    }
+}
+
 impl TryFrom<&CommandRequestRaw> for CommandRequest {
     type Error = ProtocolError;
 
