@@ -91,7 +91,6 @@
 //! - Use firewall rules to restrict access
 //!
 
-use std::sync::Arc;
 use std::{io, vec};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
@@ -99,7 +98,7 @@ use tokio::net::TcpStream;
 use crate::command_request::CommandRequest;
 use crate::device::NbdDriver;
 use crate::errors::{OptionReplyError, ProtocolError};
-use crate::flags::{CommandFlags, HandshakeFlags, ServerFeatures, TransmissionFlags};
+use crate::flags::{CommandFlags, HandshakeFlags, TransmissionFlags};
 use crate::io::command_reply::SimpleReplyRaw;
 use crate::io::command_request::CommandRequestRaw;
 use crate::io::option_reply::OptionReplyRaw;
@@ -107,7 +106,6 @@ use crate::io::option_request::OptionRequestRaw;
 use crate::magic::{NBD_IHAVEOPT, NBD_MAGIC};
 use crate::option_reply::{InfoPayload, OptionReply};
 use crate::option_request::OptionRequest;
-use std::future::Future;
 
 /// A trait that represents a Network Block Device driver implementation.
 ///

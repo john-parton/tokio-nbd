@@ -91,7 +91,6 @@
 //! - Use firewall rules to restrict access
 //!
 
-use crate::command_request::CommandRequest;
 use crate::errors::{OptionReplyError, ProtocolError};
 use crate::flags::{CommandFlags, ServerFeatures};
 
