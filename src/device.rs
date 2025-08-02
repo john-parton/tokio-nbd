@@ -271,7 +271,9 @@ pub trait NbdDriver {
     /// - `Err(ProtocolError)`: If an error occurs during the read operation
     ///
     /// # Implementation Notes
-    /// - Check for out-of-bounds reads and return appropriate errors
+    /// - It is not necessary to check for out-of-bounds writes, as the server implementation
+    ///  handles these cases before they reach the driver
+    /// - Other errors should be mapped to a `ProtocolError` member as appropriate
     /// - Honor any relevant flags (e.g., `CommandFlags::DF` for Don't Fragment)
     /// - For optimal performance, consider pre-allocating the result vector
     fn read(
@@ -293,7 +295,9 @@ pub trait NbdDriver {
     /// - `Err(ProtocolError)`: If an error occurs during the write operation
     ///
     /// # Implementation Notes
-    /// - Check for out-of-bounds writes and return appropriate errors
+    /// - It is not necessary to check for out-of-bounds writes, as the server implementation
+    ///  handles these cases before they reach the driver
+    /// - Other errors should be mapped to a `ProtocolError` member as appropriate
     /// - Honor the Force Unit Access flag (`CommandFlags::FUA`) if supported
     /// - Consider atomicity guarantees for your storage backend
     fn write(
@@ -330,6 +334,9 @@ pub trait NbdDriver {
     ///
     /// # Implementation Notes
     /// - If your storage backend doesn't support trim operations, return `ProtocolError::CommandNotSupported`
+    /// - It is not necessary to check for out-of-bounds writes, as the server implementation
+    ///  handles these cases before they reach the driver
+    /// - Other errors should be mapped to a `ProtocolError` member as appropriate
     /// - This operation indicates that the data in the specified range is no longer needed
     fn trim(
         &self,
@@ -350,6 +357,9 @@ pub trait NbdDriver {
     /// - `Err(ProtocolError)`: If an error occurs or the operation is not supported
     ///
     /// # Implementation Notes
+    /// - It is not necessary to check for out-of-bounds writes, as the server implementation
+    ///  handles these cases before they reach the driver
+    /// - Other errors should be mapped to a `ProtocolError` member as appropriate
     /// - If `CommandFlags::NO_HOLE` is set, the operation should ensure the resulting zeroes will read back as zeroes
     /// - If your backend has a native "write zeroes" operation, use it for efficiency
     /// - Otherwise, consider whether to allocate and write a buffer of zeroes or to use hole punching
@@ -396,25 +406,16 @@ pub trait NbdDriver {
     /// Requests that the driver cache a range of bytes for faster access.
     ///
     /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the cache operation
-    /// - `offset`: Byte offset within the device to start caching from
+    /// - `flags`: Command flags for the cache operation
+    /// - `offset`: Start offset in bytes
     /// - `length`: Number of bytes to cache
     ///
     /// # Returns
-    /// - `Ok(())`: If the cache operation succeeds
-    /// - `Err(ProtocolError)`: If an error occurs or cache operations are not supported
+    /// - `Ok(())`: If caching succeeds
+    /// - `Err(ProtocolError)`: If not supported or on error
     ///
-    /// # Implementation Notes
-    /// - Most implementations should return `ProtocolError::CommandNotSupported` unless they implement
-    ///   specific caching mechanisms
-    /// - A typical implementation might look like:
-    ///   ```rust,compile_fail
-    ///   async fn cache(&self, _flags: CommandFlags, _offset: u64, _length: u32) -> Result<(), ProtocolError> {
-    ///       // Most implementations don't support caching, so return CommandNotSupported
-    ///       Err(ProtocolError::CommandNotSupported)
-    ///   }
-    ///   ```
-    /// - If your backend has a native prefetch/cache mechanism, you can use it here
+    /// # Notes
+    /// Most backends should return `ProtocolError::CommandNotSupported` unless caching is implemented.
     fn cache(
         &self,
         flags: CommandFlags,
@@ -447,6 +448,10 @@ pub trait NbdDriver {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    // Note that these tests include test for out-of-bounds reads/writes,
+    // but the server implementation does handle these cases before they
+    // reach the driver.
+
     use super::NbdDriver;
     use crate::errors::{OptionReplyError, ProtocolError};
     use crate::flags::{CommandFlags, ServerFeatures};

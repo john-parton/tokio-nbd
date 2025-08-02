@@ -252,21 +252,10 @@ where
     // This let's us implement the check to forbid
     // write commands on a read-only device.
     read_only: bool,
-}
-
-impl<'a, T> SelectedDevice<'a, T>
-where
-    T: NbdDriver + std::fmt::Debug,
-{
-    fn is_command_permitted(&self, command: CommandRequest) -> bool {
-        match command {
-            CommandRequest::Read(_, _)
-            | CommandRequest::Disconnect
-            | CommandRequest::Cache(_, _)
-            | CommandRequest::BlockStatus(_, _) => true,
-            _ => !self.read_only,
-        }
-    }
+    /// The size of the device in bytes
+    /// This is so that we can do automatic bounds checking
+    /// without requiring implementors to check it themselves
+    size: u64,
 }
 
 /// Internal enum to control flow during option negotiation.
@@ -378,11 +367,13 @@ where
         dbg!("Starting options negotiation");
         let selected_device = self.handle_options(&mut reader, &mut writer).await?;
         dbg!("Starting command handling");
+        // Function signature is getting too long
         self.handle_commands(
             &selected_device.device,
             &mut reader,
             &mut writer,
             selected_device.read_only,
+            selected_device.size,
         )
         .await?;
         Ok(())
@@ -506,6 +497,7 @@ where
                 let mut flags: TransmissionFlags = device.get_features().into();
 
                 let read_only = device.get_read_only().await?;
+                let size = device.get_device_size().await?;
 
                 // A separate method to make the driver API cleaner
                 if read_only {
@@ -516,10 +508,7 @@ where
                 // The client may or may not honor it, but some don't request it at all and just move on
                 // We should probably store which information types were explicitly requested and
                 // expose that information to the driver
-                responses.push(OptionReply::Info(InfoPayload::Export(
-                    device.get_device_size().await?,
-                    flags,
-                )));
+                responses.push(OptionReply::Info(InfoPayload::Export(size, flags)));
                 responses.push(OptionReply::Info(InfoPayload::Name(name.clone())));
                 responses.push(OptionReply::Info(InfoPayload::Description(
                     device.get_description().await?,
@@ -535,6 +524,7 @@ where
                         OptionReplyFinalize::End(SelectedDevice {
                             device: &device,
                             read_only,
+                            size,
                         }),
                     ));
                 }
@@ -553,6 +543,7 @@ where
                     OptionReplyFinalize::End(SelectedDevice {
                         device: &device,
                         read_only: device.get_read_only().await?,
+                        size: device.get_device_size().await?,
                     }),
                 ));
             }
@@ -727,6 +718,7 @@ where
         reader: &mut R,
         writer: &mut W,
         read_only: bool,
+        device_size: u64,
     ) -> io::Result<()>
     where
         R: AsyncReadExt + Unpin,
@@ -758,6 +750,7 @@ where
                 }
             };
 
+            // If the device is read-only, we should not allow write operations
             if read_only && command.is_write_command() {
                 // If the command requires write access but the device is read-only,
                 // write an error reply and continue
@@ -768,8 +761,33 @@ where
                 continue;
             }
 
-            // If the device is read-only, we should not allow write operations
-            // We could require the implementor to check this in the driver?
+            // For Read, Write, Trim, WriteZeroes, Cache, BlockStatus, we do a bounds check
+            // to ensure the operation does not exceed the device size.
+            let bounds_check_fail = match command {
+                CommandRequest::Read(offset, length)
+                | CommandRequest::Trim(offset, length)
+                | CommandRequest::WriteZeroes(offset, length)
+                | CommandRequest::Cache(offset, length)
+                | CommandRequest::BlockStatus(offset, length) => {
+                    offset + length as u64 > device_size
+                }
+                CommandRequest::Write(offset, data) => offset + data.len() as u64 > device_size,
+                _ => false,
+            };
+
+            if bounds_check_fail {
+                let reply =
+                    SimpleReplyRaw::new(ProtocolError::ValueTooLarge.into(), cookie, vec![]);
+                reply.write(writer).await?;
+                writer.flush().await?;
+                continue;
+            }
+
+            // There are a few edge cases we could handle here.
+            // For example, a `Write` command with an empty data vector
+            // could be treated as a no-op.
+            // A `Read` command with a length of 0 could return an empty vector,
+            // without consulting the device.
 
             let result = match command {
                 // Disconnection is the only operation without a reply
@@ -798,7 +816,7 @@ where
                     device.cache(flags, offset, length).await.map(|_| vec![])
                 }
                 // Not implemented yet
-                CommandRequest::BlockStatus(..) => {
+                CommandRequest::BlockStatus(_, _) => {
                     device
                         .block_status(flags, command_raw.offset, command_raw.length)
                         .await
