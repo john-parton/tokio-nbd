@@ -465,7 +465,7 @@ pub(crate) mod tests {
     impl Default for MemoryDriver {
         fn default() -> Self {
             MemoryDriver {
-                data: RwLock::new(vec![0; 1024 * 1024]), // 1MB of zeroed memory
+                data: RwLock::new(vec![0; 1024]), // 1KB of zeroed memory for tests
                 read_only: false,
                 name: "".to_string(),
             }
@@ -496,7 +496,8 @@ pub(crate) mod tests {
             let start = offset as usize;
             let end = start + length as usize;
 
-            if end > data.len() {
+            // Check if read is within bounds
+            if start >= data.len() || (length > 0 && end > data.len()) {
                 return Err(ProtocolError::InvalidArgument);
             }
 
@@ -531,7 +532,7 @@ pub(crate) mod tests {
 
         async fn write(
             &self,
-            flags: CommandFlags,
+            _flags: CommandFlags,
             offset: u64,
             data: Vec<u8>,
         ) -> Result<(), ProtocolError> {
@@ -539,7 +540,8 @@ pub(crate) mod tests {
             let start = offset as usize;
             let end = start + data.len();
 
-            if end > memory.len() {
+            // Check if write is within bounds
+            if start >= memory.len() || (data.len() > 0 && end > memory.len()) {
                 return Err(ProtocolError::InvalidArgument);
             }
 
@@ -547,41 +549,41 @@ pub(crate) mod tests {
             Ok(())
         }
 
-        async fn flush(&self, flags: CommandFlags) -> Result<(), ProtocolError> {
+        async fn flush(&self, _flags: CommandFlags) -> Result<(), ProtocolError> {
             Err(ProtocolError::CommandNotSupported)
         }
 
         async fn trim(
             &self,
-            flags: CommandFlags,
-            offset: u64,
-            length: u32,
+            _flags: CommandFlags,
+            _offset: u64,
+            _length: u32,
         ) -> Result<(), ProtocolError> {
             Err(ProtocolError::CommandNotSupported)
         }
 
         async fn write_zeroes(
             &self,
-            flags: CommandFlags,
-            offset: u64,
-            length: u32,
+            _flags: CommandFlags,
+            _offset: u64,
+            _length: u32,
         ) -> Result<(), ProtocolError> {
             Err(ProtocolError::CommandNotSupported)
         }
 
-        async fn disconnect(&self, flags: CommandFlags) -> Result<(), ProtocolError> {
+        async fn disconnect(&self, _flags: CommandFlags) -> Result<(), ProtocolError> {
             Ok(())
         }
 
-        async fn resize(&self, flags: CommandFlags, size: u64) -> Result<(), ProtocolError> {
+        async fn resize(&self, _flags: CommandFlags, _size: u64) -> Result<(), ProtocolError> {
             Err(ProtocolError::CommandNotSupported)
         }
 
         async fn block_status(
             &self,
-            flags: CommandFlags,
-            offset: u64,
-            length: u32,
+            _flags: CommandFlags,
+            _offset: u64,
+            _length: u32,
         ) -> Result<(), ProtocolError> {
             Err(ProtocolError::CommandNotSupported)
         }
