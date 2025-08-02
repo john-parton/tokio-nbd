@@ -129,7 +129,7 @@ use crate::flags::{CommandFlags, ServerFeatures};
 /// Here's a simplified example of a memory-backed NBD driver:
 ///
 /// ```rust,compile_fail
-/// use tokio_nbd::driver::NbdDriver;
+/// use tokio_nbd::device::NbdDriver;
 /// use tokio_nbd::flags::{ServerFeatures, CommandFlags};
 /// use tokio_nbd::errors::{ProtocolError, OptionReplyError};
 /// use std::sync::RwLock;
@@ -144,12 +144,6 @@ use crate::flags::{CommandFlags, ServerFeatures};
 ///     fn get_features(&self) -> ServerFeatures {
 ///         // Support basic read/write operations but not advanced features
 ///         ServerFeatures::SEND_FLUSH | ServerFeatures::SEND_FUA
-///     }
-///     
-///     // Basic device info methods implementation
-///     async fn list_devices(&self) -> Result<Vec<String>, OptionReplyError> {
-///         // Only one device available
-///         Ok(vec!["memory".to_string()])
 ///     }
 ///     
 ///     async fn get_read_only(&self, device_name: &str) -> Result<bool, OptionReplyError> {
@@ -449,18 +443,6 @@ pub trait NbdDriver {
         offset: u64,
         length: u32,
     ) -> impl Future<Output = Result<(), ProtocolError>>;
-
-    fn is_command_permitted(&self, command: &CommandRequest) -> bool {
-        return !(self.read_only
-            && matches!(
-                command,
-                CommandRequest::Write(_, _)
-                    | CommandRequest::Flush
-                    | CommandRequest::Trim(_, _)
-                    | CommandRequest::WriteZeroes(_, _)
-                    | CommandRequest::Resize(_)
-            ));
-    }
 }
 
 #[cfg(test)]
@@ -719,6 +701,22 @@ pub(crate) mod tests {
         // Check read-only status
         let read_only = driver.get_read_only().await.unwrap();
         assert_eq!(read_only, false);
+    }
+
+    #[tokio::test]
+    async fn driver_memory_get_name() {
+        // Create driver with a specific name
+        let mut driver = MemoryDriver::default();
+        driver.name = "test-device".to_string();
+
+        // Verify that get_name returns the expected name
+        let name = driver.get_name();
+        assert_eq!(name, "test-device");
+
+        // Verify name changes are reflected
+        driver.name = "another-device".to_string();
+        let name = driver.get_name();
+        assert_eq!(name, "another-device");
     }
 
     #[tokio::test]
