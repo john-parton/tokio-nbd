@@ -464,7 +464,7 @@ pub trait NbdDriver {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::NbdDriver;
     use crate::errors::{OptionReplyError, ProtocolError};
     use crate::flags::{CommandFlags, ServerFeatures};
@@ -473,9 +473,11 @@ mod tests {
 
     use std::sync::RwLock;
 
-    struct MemoryDriver {
+    #[derive(Debug)]
+    pub(crate) struct MemoryDriver {
         data: RwLock<Vec<u8>>,
         read_only: bool,
+        name: String,
     }
 
     impl Default for MemoryDriver {
@@ -483,13 +485,14 @@ mod tests {
             MemoryDriver {
                 data: RwLock::new(vec![0; 1024 * 1024]), // 1MB of zeroed memory
                 read_only: false,
+                name: "".to_string(),
             }
         }
     }
 
     impl NbdDriver for MemoryDriver {
         fn get_name(&self) -> String {
-            "memory".to_string()
+            self.name.clone()
         }
 
         fn get_features(&self) -> ServerFeatures {

@@ -97,7 +97,7 @@ use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 
 use crate::command_request::CommandRequest;
-use crate::device::NbdDevice;
+use crate::device::NbdDriver;
 use crate::errors::{OptionReplyError, ProtocolError};
 use crate::flags::{CommandFlags, HandshakeFlags, ServerFeatures, TransmissionFlags};
 use crate::io::command_reply::SimpleReplyRaw;
@@ -206,203 +206,6 @@ use std::future::Future;
 ///     // Other methods implementation...
 /// }
 /// ```
-pub trait NbdDriver<T: NbdDevice> {
-    fn get_device(&self, device_name: &str) -> Option<T>;
-
-    /// Returns a list of available devices provided by this driver.
-    ///
-    /// # Returns
-    /// - `Ok(Vec<String>)`: A list of device names that can be exported
-    /// - `Err(OptionReplyError)`: If an error occurs while retrieving the device list
-    fn list_devices(&self) -> impl Future<Output = Result<Vec<String>, OptionReplyError>>;
-
-    // ----- Core Data Operations -----
-
-    /// Reads data from the device.
-    ///
-    /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the read operation
-    /// - `offset`: Byte offset within the device to start reading from
-    /// - `length`: Number of bytes to read
-    ///
-    /// # Returns
-    /// - `Ok(Vec<u8>)`: The data read from the device
-    /// - `Err(ProtocolError)`: If an error occurs during the read operation
-    ///
-    /// # Implementation Notes
-    /// - Check for out-of-bounds reads and return appropriate errors
-    /// - Honor any relevant flags (e.g., `CommandFlags::DF` for Don't Fragment)
-    /// - For optimal performance, consider pre-allocating the result vector
-    fn read(
-        &self,
-        flags: CommandFlags,
-        offset: u64,
-        length: u32,
-    ) -> impl Future<Output = Result<Vec<u8>, ProtocolError>>;
-
-    /// Writes data to the device.
-    ///
-    /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the write operation
-    /// - `offset`: Byte offset within the device to start writing to
-    /// - `data`: The data to write to the device
-    ///
-    /// # Returns
-    /// - `Ok(())`: If the write operation succeeds
-    /// - `Err(ProtocolError)`: If an error occurs during the write operation
-    ///
-    /// # Implementation Notes
-    /// - Check for out-of-bounds writes and return appropriate errors
-    /// - Honor the Force Unit Access flag (`CommandFlags::FUA`) if supported
-    /// - Consider atomicity guarantees for your storage backend
-    fn write(
-        &self,
-        flags: CommandFlags,
-        offset: u64,
-        data: Vec<u8>,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
-
-    /// Ensures all pending writes are committed to stable storage.
-    ///
-    /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the flush operation
-    ///
-    /// # Returns
-    /// - `Ok(())`: If the flush operation succeeds
-    /// - `Err(ProtocolError)`: If an error occurs during the flush operation
-    ///
-    /// # Implementation Notes
-    /// - If your backend doesn't need explicit flushing, you can implement this as a no-op
-    /// - This operation should block until all data is safely persisted
-    fn flush(&self, flags: CommandFlags) -> impl Future<Output = Result<(), ProtocolError>>;
-
-    /// Discards (trims) a range of bytes on the device.
-    ///
-    /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the trim operation
-    /// - `offset`: Byte offset within the device to start trimming from
-    /// - `length`: Number of bytes to trim
-    ///
-    /// # Returns
-    /// - `Ok(())`: If the trim operation succeeds
-    /// - `Err(ProtocolError)`: If an error occurs or trim operations are not supported
-    ///
-    /// # Implementation Notes
-    /// - If your storage backend doesn't support trim operations, return `ProtocolError::CommandNotSupported`
-    /// - This operation indicates that the data in the specified range is no longer needed
-    fn trim(
-        &self,
-        flags: CommandFlags,
-        offset: u64,
-        length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
-
-    /// Writes zeroes to a range of bytes on the device.
-    ///
-    /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the write zeroes operation
-    /// - `offset`: Byte offset within the device to start writing zeroes from
-    /// - `length`: Number of bytes to zero
-    ///
-    /// # Returns
-    /// - `Ok(())`: If the write zeroes operation succeeds
-    /// - `Err(ProtocolError)`: If an error occurs or the operation is not supported
-    ///
-    /// # Implementation Notes
-    /// - If `CommandFlags::NO_HOLE` is set, the operation should ensure the resulting zeroes will read back as zeroes
-    /// - If your backend has a native "write zeroes" operation, use it for efficiency
-    /// - Otherwise, consider whether to allocate and write a buffer of zeroes or to use hole punching
-    fn write_zeroes(
-        &self,
-        flags: CommandFlags,
-        offset: u64,
-        length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
-
-    /// Notifies the driver that a client is disconnecting.
-    ///
-    /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the disconnect operation
-    ///
-    /// # Returns
-    /// - `Ok(())`: If the disconnect operation succeeds
-    /// - `Err(ProtocolError)`: If an error occurs during the disconnect operation
-    ///
-    /// # Implementation Notes
-    /// - Use this to clean up any resources associated with the client
-    /// - This is the last command sent by a client before disconnecting
-    fn disconnect(&self, flags: CommandFlags) -> impl Future<Output = Result<(), ProtocolError>>;
-
-    /// Resizes the device to the specified size.
-    ///
-    /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the resize operation
-    /// - `size`: The new size of the device in bytes
-    ///
-    /// # Returns
-    /// - `Ok(())`: If the resize operation succeeds
-    /// - `Err(ProtocolError)`: If an error occurs or resize operations are not supported
-    ///
-    /// # Implementation Notes
-    /// - If your storage backend doesn't support dynamic resizing, return `ProtocolError::CommandNotSupported`
-    /// - If resizing would cause data loss, consider required flags or permissions
-    fn resize(
-        &self,
-        flags: CommandFlags,
-        size: u64,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
-
-    /// Requests that the driver cache a range of bytes for faster access.
-    ///
-    /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the cache operation
-    /// - `offset`: Byte offset within the device to start caching from
-    /// - `length`: Number of bytes to cache
-    ///
-    /// # Returns
-    /// - `Ok(())`: If the cache operation succeeds
-    /// - `Err(ProtocolError)`: If an error occurs or cache operations are not supported
-    ///
-    /// # Implementation Notes
-    /// - Most implementations should return `ProtocolError::CommandNotSupported` unless they implement
-    ///   specific caching mechanisms
-    /// - A typical implementation might look like:
-    ///   ```rust,compile_fail
-    ///   async fn cache(&self, _flags: CommandFlags, _offset: u64, _length: u32) -> Result<(), ProtocolError> {
-    ///       // Most implementations don't support caching, so return CommandNotSupported
-    ///       Err(ProtocolError::CommandNotSupported)
-    ///   }
-    ///   ```
-    /// - If your backend has a native prefetch/cache mechanism, you can use it here
-    fn cache(
-        &self,
-        flags: CommandFlags,
-        offset: u64,
-        length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
-
-    /// Retrieves information about block allocation status.
-    ///
-    /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the block status operation
-    /// - `offset`: Byte offset within the device to start checking from
-    /// - `length`: Number of bytes to check
-    ///
-    /// # Returns
-    /// - `Ok(())`: If the block status operation succeeds
-    /// - `Err(ProtocolError)`: If an error occurs or the operation is not supported
-    ///
-    /// # Implementation Notes
-    /// - This is an advanced feature defined by the EXTENDED_HEADERS extension
-    /// - Most implementations should return `ProtocolError::CommandNotSupported`
-    /// - Consider implementing this if your storage backend has efficient ways to check if blocks are allocated
-    fn block_status(
-        &self,
-        flags: CommandFlags,
-        offset: u64,
-        length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
-}
 
 /// # Additional Implementation Guidance
 ///
@@ -437,37 +240,32 @@ pub trait NbdDriver<T: NbdDevice> {
 /// implementations should be thread-safe. Consider using synchronization primitives like
 /// `Arc<Mutex<T>>`, `RwLock`, or other concurrency controls appropriate for your storage backend.
 
-// Some basic data to keep track of the selected device
 #[derive(Debug)]
-/// Internal structure to track a selected device's properties.
-///
-/// Used during the command processing phase to enforce permissions
-/// and other device-specific settings.
-struct SelectedDevice {
-    /// Whether the device is read-only
+struct SelectedDevice<'a, T>
+where
+    T: NbdDriver + std::fmt::Debug,
+{
+    /// The selected device for the transmission phase
+    device: &'a T,
+    // It's assumed that once a device is selected, the
+    // read-only status is known and does not change
+    // This let's us implement the check to forbid
+    // write commands on a read-only device.
     read_only: bool,
 }
 
-impl SelectedDevice {
-    /// Determines if a command is permitted based on device properties.
-    ///
-    /// Checks if write operations are allowed on read-only devices.
-    ///
-    /// # Parameters
-    /// - `command`: The command to check
-    ///
-    /// # Returns
-    /// - `true` if the command is permitted, `false` otherwise
-    fn is_command_permitted(&self, command: &CommandRequest) -> bool {
-        return !(self.read_only
-            && matches!(
-                command,
-                CommandRequest::Write(_, _)
-                    | CommandRequest::Flush
-                    | CommandRequest::Trim(_, _)
-                    | CommandRequest::WriteZeroes(_, _)
-                    | CommandRequest::Resize(_)
-            ));
+impl<'a, T> SelectedDevice<'a, T>
+where
+    T: NbdDriver + std::fmt::Debug,
+{
+    fn is_command_permitted(&self, command: CommandRequest) -> bool {
+        match command {
+            CommandRequest::Read(_, _)
+            | CommandRequest::Disconnect
+            | CommandRequest::Cache(_, _)
+            | CommandRequest::BlockStatus(_, _) => true,
+            _ => !self.read_only,
+        }
     }
 }
 
@@ -475,7 +273,10 @@ impl SelectedDevice {
 ///
 /// Used by the option handling code to determine what action to take
 /// after processing an option request.
-enum OptionReplyFinalize<T> {
+enum OptionReplyFinalize<'a, T>
+where
+    T: NbdDriver + std::fmt::Debug + 'a,
+{
     /// Abort the negotiation (e.g., client sent an Abort request)
     Abort,
 
@@ -483,7 +284,7 @@ enum OptionReplyFinalize<T> {
     Continue,
 
     /// End the negotiation and proceed to transmission phase
-    End(T),
+    End(SelectedDevice<'a, T>),
 }
 
 /// The main NBD server implementation.
@@ -495,12 +296,18 @@ enum OptionReplyFinalize<T> {
 /// # Type Parameters
 ///
 /// - `T`: A type that implements the `NbdDriver` trait
-pub struct NbdServer<T: NbdDevice> {
+pub struct NbdServer<T>
+where
+    T: NbdDriver + std::fmt::Debug,
+{
     /// The driver implementation for handling storage operations
     devices: Vec<T>,
 }
 
-impl<T: NbdDevice> NbdServer<T> {
+impl<T> NbdServer<T>
+where
+    T: NbdDriver + std::fmt::Debug,
+{
     /// Creates a new NBD server with the given devices.
     ///
     /// # Parameters
@@ -512,6 +319,19 @@ impl<T: NbdDevice> NbdServer<T> {
         // Initializing the server with zero length vec is an error, but not
         // checked here. Check in 'start'
         Self { devices }
+    }
+
+    async fn list_devices(&self) -> Result<Vec<String>, OptionReplyError> {
+        if self.devices.is_empty() {
+            return Err(OptionReplyError::UnknownExport);
+        }
+
+        // Collect the names of all devices
+        let mut device_names: Vec<String> = Vec::with_capacity(self.devices.len());
+        for device in &self.devices {
+            device_names.push(device.get_name());
+        }
+        Ok(device_names)
     }
 
     // Should be be sync or async
@@ -558,8 +378,13 @@ impl<T: NbdDevice> NbdServer<T> {
         dbg!("Starting options negotiation");
         let selected_device = self.handle_options(&mut reader, &mut writer).await?;
         dbg!("Starting command handling");
-        self.handle_commands(&selected_device, &mut reader, &mut writer)
-            .await?;
+        self.handle_commands(
+            &selected_device.device,
+            &mut reader,
+            &mut writer,
+            selected_device.read_only,
+        )
+        .await?;
         Ok(())
     }
 
@@ -658,7 +483,7 @@ impl<T: NbdDevice> NbdServer<T> {
     async fn handle_option_request(
         &self,
         request: &OptionRequest,
-    ) -> Result<(Vec<OptionReply>, OptionReplyFinalize<&T>), OptionReplyError> {
+    ) -> Result<(Vec<OptionReply>, OptionReplyFinalize<T>), OptionReplyError> {
         let mut responses: Vec<OptionReply> = Vec::new();
 
         match request {
@@ -668,7 +493,7 @@ impl<T: NbdDevice> NbdServer<T> {
             }
             OptionRequest::List => {
                 // List request, send the list of devices
-                for device in self.driver.list_devices().await? {
+                for device in self.list_devices().await? {
                     responses.push(OptionReply::Server(device));
                 }
             }
@@ -680,8 +505,10 @@ impl<T: NbdDevice> NbdServer<T> {
 
                 let mut flags: TransmissionFlags = device.get_features().into();
 
+                let read_only = device.get_read_only().await?;
+
                 // A separate method to make the driver API cleaner
-                if device.get_read_only(name).await? {
+                if read_only {
                     flags.insert(TransmissionFlags::READ_ONLY);
                 }
 
@@ -690,20 +517,26 @@ impl<T: NbdDevice> NbdServer<T> {
                 // We should probably store which information types were explicitly requested and
                 // expose that information to the driver
                 responses.push(OptionReply::Info(InfoPayload::Export(
-                    device.get_device_size(name).await?,
+                    device.get_device_size().await?,
                     flags,
                 )));
                 responses.push(OptionReply::Info(InfoPayload::Name(name.clone())));
                 responses.push(OptionReply::Info(InfoPayload::Description(
-                    device.get_description(name).await?,
+                    device.get_description().await?,
                 )));
-                let (min, optimal, max) = device.get_block_size(name).await?;
+                let (min, optimal, max) = device.get_block_size().await?;
                 responses.push(OptionReply::Info(InfoPayload::BlockSize(min, optimal, max)));
 
                 responses.push(OptionReply::Ack);
 
                 if matches!(request, OptionRequest::Go(..)) {
-                    return Ok((responses, OptionReplyFinalize::End(device)));
+                    return Ok((
+                        responses,
+                        OptionReplyFinalize::End(SelectedDevice {
+                            device: &device,
+                            read_only,
+                        }),
+                    ));
                 }
             }
             OptionRequest::StructuredReply => unimplemented!(),
@@ -711,11 +544,17 @@ impl<T: NbdDevice> NbdServer<T> {
             OptionRequest::SetMetaContext(_) => unimplemented!(),
             OptionRequest::ExtendedHeaders(_) => unimplemented!(),
             OptionRequest::ExportName(name) => {
+                let Some(device) = self.get_device(name) else {
+                    return Err(OptionReplyError::UnknownExport);
+                };
                 // Is this really correct? No ack, just go right into transmission?
-                let device = self
-                    .get_device("")
-                    .expect("Default device should always exist");
-                return Ok((vec![], OptionReplyFinalize::End(device)));
+                return Ok((
+                    vec![],
+                    OptionReplyFinalize::End(SelectedDevice {
+                        device: &device,
+                        read_only: device.get_read_only().await?,
+                    }),
+                ));
             }
         }
         Ok((responses, OptionReplyFinalize::Continue))
@@ -786,7 +625,11 @@ impl<T: NbdDevice> NbdServer<T> {
     /// - List available devices
     /// - Query device information (size, read-only status, etc.)
     /// - Select a device for the transmission phase
-    async fn handle_options<R, W>(&self, reader: &mut R, writer: &mut W) -> std::io::Result<T>
+    async fn handle_options<R, W>(
+        &self,
+        reader: &mut R,
+        writer: &mut W,
+    ) -> std::io::Result<SelectedDevice<T>>
     where
         R: AsyncReadExt + Unpin,
         W: AsyncWrite + Unpin,
@@ -880,9 +723,10 @@ impl<T: NbdDevice> NbdServer<T> {
     /// This continues until either the client disconnects or an error occurs.
     async fn handle_commands<R, W>(
         &self,
-        selected_device: &T,
+        device: &T,
         reader: &mut R,
         writer: &mut W,
+        read_only: bool,
     ) -> io::Result<()>
     where
         R: AsyncReadExt + Unpin,
@@ -914,51 +758,54 @@ impl<T: NbdDevice> NbdServer<T> {
                 }
             };
 
-            // If the device is read-only, we should not allow write operations
-            let command_not_permitted = !selected_device.is_command_permitted(&command);
+            if read_only && command.is_write_command() {
+                // If the command requires write access but the device is read-only,
+                // write an error reply and continue
+                let reply =
+                    SimpleReplyRaw::new(ProtocolError::CommandNotPermitted.into(), cookie, vec![]);
+                reply.write(writer).await?;
+                writer.flush().await?;
+                continue;
+            }
 
-            let result = if command_not_permitted {
-                Err(ProtocolError::CommandNotPermitted)
-            } else {
-                match command {
-                    // Disconnection is the only operation without a reply
-                    // and a return early
-                    CommandRequest::Disconnect => {
-                        selected_device
-                            .disconnect(flags)
-                            .await
-                            .expect("Failed to disconnect");
-                        return Ok(());
-                    }
-                    CommandRequest::Read(offset, length) => {
-                        selected_device.read(flags, offset, length).await
-                    }
-                    CommandRequest::Write(offset, data) => selected_device
-                        .write(flags, offset, data)
+            // If the device is read-only, we should not allow write operations
+            // We could require the implementor to check this in the driver?
+
+            let result = match command {
+                // Disconnection is the only operation without a reply
+                // and a return early
+                CommandRequest::Disconnect => {
+                    device
+                        .disconnect(flags)
                         .await
-                        .map(|_| vec![]),
-                    CommandRequest::Flush => selected_device.flush(flags).await.map(|_| vec![]),
-                    CommandRequest::Trim(offset, length) => selected_device
-                        .trim(flags, offset, length)
-                        .await
-                        .map(|_| vec![]),
-                    CommandRequest::WriteZeroes(offset, length) => selected_device
-                        .write_zeroes(flags, offset, length)
-                        .await
-                        .map(|_| vec![]),
-                    CommandRequest::Resize(size) => {
-                        selected_device.resize(flags, size).await.map(|_| vec![])
-                    }
-                    CommandRequest::Cache(offset, length) => selected_device
-                        .cache(flags, offset, length)
-                        .await
-                        .map(|_| vec![]),
-                    // Not implemented yet
-                    CommandRequest::BlockStatus(..) => selected_device
+                        .expect("Failed to disconnect");
+                    return Ok(());
+                }
+                CommandRequest::Read(offset, length) => device.read(flags, offset, length).await,
+                CommandRequest::Write(offset, data) => {
+                    device.write(flags, offset, data).await.map(|_| vec![])
+                }
+                CommandRequest::Flush => device.flush(flags).await.map(|_| vec![]),
+                CommandRequest::Trim(offset, length) => {
+                    device.trim(flags, offset, length).await.map(|_| vec![])
+                }
+                CommandRequest::WriteZeroes(offset, length) => device
+                    .write_zeroes(flags, offset, length)
+                    .await
+                    .map(|_| vec![]),
+                CommandRequest::Resize(size) => {
+                    { device.resize(flags, size).await.map(|_| vec![]) }.map(|_| vec![])
+                }
+                CommandRequest::Cache(offset, length) => {
+                    device.cache(flags, offset, length).await.map(|_| vec![])
+                }
+                // Not implemented yet
+                CommandRequest::BlockStatus(..) => {
+                    device
                         .block_status(flags, command_raw.offset, command_raw.length)
                         .await
-                        .map(|_| vec![]),
                 }
+                .map(|_| vec![]),
             };
 
             let (reply, abort) = match result {
@@ -994,6 +841,8 @@ impl<T: NbdDevice> NbdServer<T> {
 #[cfg(test)]
 mod tests {
     use super::NbdDriver;
+    use crate::device::tests::MemoryDriver;
+    use crate::driver::NbdServer;
     use crate::errors::{OptionReplyError, ProtocolError};
     use crate::flags::{CommandFlags, ServerFeatures};
 
@@ -1001,143 +850,15 @@ mod tests {
 
     use std::sync::RwLock;
 
-    struct MemoryDriver {
-        data: RwLock<Vec<u8>>,
-    }
-
-    impl NbdDriver for MemoryDriver {
-        fn get_features(&self) -> ServerFeatures {
-            // Support basic read/write operations but not advanced features
-            ServerFeatures::SEND_FLUSH | ServerFeatures::SEND_FUA
-        }
-
-        // Basic device info methods implementation
-        async fn list_devices(&self) -> Result<Vec<String>, OptionReplyError> {
-            // Only one device available
-            Ok(vec!["memory".to_string()])
-        }
-
-        async fn get_read_only(&self, device_name: &str) -> Result<bool, OptionReplyError> {
-            if device_name == "memory" {
-                Ok(false) // Device is writable
-            } else {
-                Err(OptionReplyError::Unknown)
-            }
-        }
-
-        async fn read(
-            &self,
-            _flags: CommandFlags,
-            offset: u64,
-            length: u32,
-        ) -> Result<Vec<u8>, ProtocolError> {
-            let data = self.data.read().unwrap();
-            let start = offset as usize;
-            let end = start + length as usize;
-
-            if end > data.len() {
-                return Err(ProtocolError::InvalidArgument);
-            }
-
-            Ok(data[start..end].to_vec())
-        }
-
-        async fn cache(
-            &self,
-            _flags: CommandFlags,
-            _offset: u64,
-            _length: u32,
-        ) -> Result<(), ProtocolError> {
-            // Memory-backed driver doesn't need explicit caching
-            Err(ProtocolError::CommandNotSupported)
-        }
-
-        async fn get_block_size(
-            &self,
-            device_name: &str,
-        ) -> Result<(u32, u32, u32), OptionReplyError> {
-            Err(OptionReplyError::Unsupported)
-        }
-
-        async fn get_canonical_name(&self, device_name: &str) -> Result<String, OptionReplyError> {
-            Err(OptionReplyError::Unsupported)
-        }
-
-        async fn get_description(&self, device_name: &str) -> Result<String, OptionReplyError> {
-            Err(OptionReplyError::Unsupported)
-        }
-
-        async fn get_device_size(&self, device_name: &str) -> Result<u64, OptionReplyError> {
-            Ok(self.data.read().unwrap().len() as u64)
-        }
-
-        async fn write(
-            &self,
-            flags: CommandFlags,
-            offset: u64,
-            data: Vec<u8>,
-        ) -> Result<(), ProtocolError> {
-            let mut memory = self.data.write().unwrap();
-            let start = offset as usize;
-            let end = start + data.len();
-
-            if end > memory.len() {
-                return Err(ProtocolError::InvalidArgument);
-            }
-
-            memory[start..end].copy_from_slice(&data);
-            Ok(())
-        }
-
-        async fn flush(&self, flags: CommandFlags) -> Result<(), ProtocolError> {
-            Err(ProtocolError::CommandNotSupported)
-        }
-
-        async fn trim(
-            &self,
-            flags: CommandFlags,
-            offset: u64,
-            length: u32,
-        ) -> Result<(), ProtocolError> {
-            Err(ProtocolError::CommandNotSupported)
-        }
-
-        async fn write_zeroes(
-            &self,
-            flags: CommandFlags,
-            offset: u64,
-            length: u32,
-        ) -> Result<(), ProtocolError> {
-            Err(ProtocolError::CommandNotSupported)
-        }
-
-        async fn disconnect(&self, flags: CommandFlags) -> Result<(), ProtocolError> {
-            Ok(())
-        }
-
-        async fn resize(&self, flags: CommandFlags, size: u64) -> Result<(), ProtocolError> {
-            Err(ProtocolError::CommandNotSupported)
-        }
-
-        async fn block_status(
-            &self,
-            flags: CommandFlags,
-            offset: u64,
-            length: u32,
-        ) -> Result<(), ProtocolError> {
-            Err(ProtocolError::CommandNotSupported)
-        }
-
-        // Other methods implementation...
+    struct MemoryServer {
+        devices: Vec<MemoryDriver>,
     }
 
     #[tokio::test]
     async fn driver_memory_read() {
-        let driver = MemoryDriver {
-            data: RwLock::new(vec![0; 1024]), // 1KB of zeroed memory
-        };
+        let server = NbdServer::new(vec![MemoryDriver::default()]);
 
-        let result = driver.read(CommandFlags::empty(), 0, 512).await;
+        let result = server.read(CommandFlags::empty(), 0, 512).await;
         assert_eq!(result, Ok(vec![0; 512]));
     }
 
