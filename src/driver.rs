@@ -687,6 +687,79 @@ where
         }
     }
 
+    fn check_command(
+        &self,
+        command: &CommandRequest,
+        read_only: bool,
+        device_size: u64,
+    ) -> Result<(), ProtocolError> {
+        // If the device is read-only, we should not allow write operations
+        if read_only && command.is_write_command() {
+            // If the command requires write access but the device is read-only,
+            // write an error reply and continue
+            return Err(ProtocolError::CommandNotPermitted);
+        }
+
+        // For Read, Write, Trim, WriteZeroes, Cache, BlockStatus, we do a bounds check
+        // to ensure the operation does not exceed the device size.
+        let command_end = match command {
+            CommandRequest::Read(offset, length)
+            | CommandRequest::Trim(offset, length)
+            | CommandRequest::WriteZeroes(offset, length)
+            | CommandRequest::Cache(offset, length)
+            | CommandRequest::BlockStatus(offset, length) => offset + *length as u64,
+            CommandRequest::Write(offset, data) => offset + data.len() as u64,
+            _ => return Ok(()),
+        };
+
+        if command_end > device_size {
+            return Err(ProtocolError::ValueTooLarge);
+        }
+
+        Ok(())
+    }
+
+    fn bounds_check(
+        &self,
+        command: &CommandRequest,
+        device_size: u64,
+    ) -> bool {
+        // For Read, Write, Trim, WriteZeroes, Cache, BlockStatus, we do a bounds check
+        // to ensure the operation does not exceed the device size.
+        let command_end = match command {
+            CommandRequest::Read(offset, length)
+            | CommandRequest::Trim(offset, length)
+            | CommandRequest::WriteZeroes(offset, length)
+            | CommandRequest::Cache(offset, length)
+            | CommandRequest::BlockStatus(offset, length) => offset + *length as u64,
+            CommandRequest::Write(offset, data) => offset + data.len() as u64,
+            _ => return true,
+        };
+
+        command_end <= device_size
+    }
+
+    fn parse_command(
+        &self,
+        command_raw: &CommandRequestRaw,
+        read_only: bool,
+        device_size: u64,
+    ) -> Result<(CommandFlags, CommandRequest), ProtocolError> {
+        let flags = CommandFlags::try_from(command_raw.flags)
+            .map_err(|_| ProtocolError::InvalidArgument)?;
+
+        let command =
+            CommandRequest::try_from(command_raw).map_err(|_| ProtocolError::InvalidArgument)?;
+
+        if read_only && command.is_write_command() {
+            Err(ProtocolError::CommandNotPermitted)
+        } else if !self.bounds_check(&command, device_size) {
+            Err(ProtocolError::ValueTooLarge)
+        } else {
+            Ok((flags, command))
+        }
+    }
+
     /// Handles NBD commands during the transmission phase.
     ///
     /// This method is responsible for processing NBD commands after option
@@ -727,20 +800,12 @@ where
         loop {
             let command_raw = CommandRequestRaw::read(reader).await?;
 
-            // should be before match due to partial move
             let cookie = command_raw.cookie;
 
-            let Ok(flags) = CommandFlags::try_from(command_raw.flags) else {
-                // If flags are invalid, write an error reply and continue
-                let reply =
-                    SimpleReplyRaw::new(ProtocolError::InvalidArgument.into(), cookie, vec![]);
-                reply.write(writer).await?;
-                writer.flush().await?;
-                continue;
-            };
-
-            let command = match CommandRequest::try_from(&command_raw) {
-                Ok(op) => op,
+            let (flags, command) = match self.parse_command(&command_raw, read_only, device_size) {
+                Ok((flags, command)) => {
+                    (flags, command)
+                },
                 Err(e) => {
                     // Write an error reply and continue
                     let reply = SimpleReplyRaw::new(e.into(), cookie, vec![]);
@@ -748,39 +813,6 @@ where
                     writer.flush().await?;
                     continue;
                 }
-            };
-
-            // If the device is read-only, we should not allow write operations
-            if read_only && command.is_write_command() {
-                // If the command requires write access but the device is read-only,
-                // write an error reply and continue
-                let reply =
-                    SimpleReplyRaw::new(ProtocolError::CommandNotPermitted.into(), cookie, vec![]);
-                reply.write(writer).await?;
-                writer.flush().await?;
-                continue;
-            }
-
-            // For Read, Write, Trim, WriteZeroes, Cache, BlockStatus, we do a bounds check
-            // to ensure the operation does not exceed the device size.
-            let bounds_check_fail = match command {
-                CommandRequest::Read(offset, length)
-                | CommandRequest::Trim(offset, length)
-                | CommandRequest::WriteZeroes(offset, length)
-                | CommandRequest::Cache(offset, length)
-                | CommandRequest::BlockStatus(offset, length) => {
-                    offset + length as u64 > device_size
-                }
-                CommandRequest::Write(offset, data) => offset + data.len() as u64 > device_size,
-                _ => false,
-            };
-
-            if bounds_check_fail {
-                let reply =
-                    SimpleReplyRaw::new(ProtocolError::ValueTooLarge.into(), cookie, vec![]);
-                reply.write(writer).await?;
-                writer.flush().await?;
-                continue;
             }
 
             // There are a few edge cases we could handle here.
