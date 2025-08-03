@@ -445,17 +445,33 @@ pub(crate) mod tests {
     }
 
     impl NbdDriver for MemoryDriver {
+        fn get_features(&self) -> ServerFeatures {
+            // Support basic read/write operations but not advanced features
+            ServerFeatures::SEND_FUA
+        }
+
         fn get_name(&self) -> String {
             self.name.clone()
         }
 
-        fn get_features(&self) -> ServerFeatures {
-            // Support basic read/write operations but not advanced features
-            ServerFeatures::SEND_FLUSH | ServerFeatures::SEND_FUA
-        }
-
         async fn get_read_only(&self) -> Result<bool, OptionReplyError> {
             Ok(self.read_only)
+        }
+
+        async fn get_block_size(&self) -> Result<(u32, u32, u32), OptionReplyError> {
+            Err(OptionReplyError::Unsupported)
+        }
+
+        async fn get_canonical_name(&self) -> Result<String, OptionReplyError> {
+            Err(OptionReplyError::Unsupported)
+        }
+
+        async fn get_description(&self) -> Result<String, OptionReplyError> {
+            Err(OptionReplyError::Unsupported)
+        }
+
+        async fn get_device_size(&self) -> Result<u64, OptionReplyError> {
+            Ok(self.data.read().unwrap().len() as u64)
         }
 
         async fn read(
@@ -474,32 +490,6 @@ pub(crate) mod tests {
             }
 
             Ok(data[start..end].to_vec())
-        }
-
-        async fn cache(
-            &self,
-            _flags: CommandFlags,
-            _offset: u64,
-            _length: u32,
-        ) -> Result<(), ProtocolError> {
-            // Memory-backed driver doesn't need explicit caching
-            Err(ProtocolError::CommandNotSupported)
-        }
-
-        async fn get_block_size(&self) -> Result<(u32, u32, u32), OptionReplyError> {
-            Err(OptionReplyError::Unsupported)
-        }
-
-        async fn get_canonical_name(&self) -> Result<String, OptionReplyError> {
-            Err(OptionReplyError::Unsupported)
-        }
-
-        async fn get_description(&self) -> Result<String, OptionReplyError> {
-            Err(OptionReplyError::Unsupported)
-        }
-
-        async fn get_device_size(&self) -> Result<u64, OptionReplyError> {
-            Ok(self.data.read().unwrap().len() as u64)
         }
 
         async fn write(
@@ -521,43 +511,8 @@ pub(crate) mod tests {
             Ok(())
         }
 
-        async fn flush(&self, _flags: CommandFlags) -> Result<(), ProtocolError> {
-            Err(ProtocolError::CommandNotSupported)
-        }
-
-        async fn trim(
-            &self,
-            _flags: CommandFlags,
-            _offset: u64,
-            _length: u32,
-        ) -> Result<(), ProtocolError> {
-            Err(ProtocolError::CommandNotSupported)
-        }
-
-        async fn write_zeroes(
-            &self,
-            _flags: CommandFlags,
-            _offset: u64,
-            _length: u32,
-        ) -> Result<(), ProtocolError> {
-            Err(ProtocolError::CommandNotSupported)
-        }
-
         async fn disconnect(&self, _flags: CommandFlags) -> Result<(), ProtocolError> {
             Ok(())
-        }
-
-        async fn resize(&self, _flags: CommandFlags, _size: u64) -> Result<(), ProtocolError> {
-            Err(ProtocolError::CommandNotSupported)
-        }
-
-        async fn block_status(
-            &self,
-            _flags: CommandFlags,
-            _offset: u64,
-            _length: u32,
-        ) -> Result<(), ProtocolError> {
-            Err(ProtocolError::CommandNotSupported)
         }
 
         // Other methods implementation...
