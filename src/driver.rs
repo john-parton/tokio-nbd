@@ -239,10 +239,9 @@ use crate::option_request::OptionRequest;
 /// implementations should be thread-safe. Consider using synchronization primitives like
 /// `Arc<Mutex<T>>`, `RwLock`, or other concurrency controls appropriate for your storage backend.
 
-#[derive(Debug)]
 struct SelectedDevice<'a, T>
 where
-    T: NbdDriver + std::fmt::Debug,
+    T: NbdDriver + 'a,
 {
     /// The selected device for the transmission phase
     device: &'a T,
@@ -255,6 +254,7 @@ where
     /// This is so that we can do automatic bounds checking
     /// without requiring implementors to check it themselves
     size: u64,
+    name: String,
 }
 
 /// Internal enum to control flow during option negotiation.
@@ -263,7 +263,7 @@ where
 /// after processing an option request.
 enum OptionReplyFinalize<'a, T>
 where
-    T: NbdDriver + std::fmt::Debug + 'a,
+    T: NbdDriver + 'a,
 {
     /// Abort the negotiation (e.g., client sent an Abort request)
     Abort,
@@ -286,7 +286,7 @@ where
 /// - `T`: A type that implements the `NbdDriver` trait
 pub struct NbdServer<T>
 where
-    T: NbdDriver + std::fmt::Debug,
+    T: NbdDriver,
 {
     /// The driver implementation for handling storage operations
     devices: Arc<Vec<T>>,
@@ -294,7 +294,7 @@ where
 
 impl<T> NbdServer<T>
 where
-    T: NbdDriver + std::fmt::Debug,
+    T: NbdDriver,
 {
     /// Creates a new NBD server with the given devices.
     ///
@@ -524,6 +524,7 @@ where
                             device: &device,
                             read_only,
                             size,
+                            name: name.clone(),
                         }),
                     ));
                 }
@@ -543,6 +544,7 @@ where
                         device: &device,
                         read_only: device.get_read_only().await?,
                         size: device.get_device_size().await?,
+                        name: name.clone(),
                     }),
                 ));
             }
@@ -676,7 +678,7 @@ where
                         OptionReplyFinalize::End(selected_device) => {
                             dbg!(
                                 "Ending option negotiation with selected device: {:?}",
-                                &selected_device
+                                &selected_device.name
                             );
                             return Ok(selected_device);
                         }
