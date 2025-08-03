@@ -91,6 +91,7 @@
 //! - Use firewall rules to restrict access
 //!
 
+use std::sync::Arc;
 use std::{io, vec};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
@@ -288,7 +289,7 @@ where
     T: NbdDriver + std::fmt::Debug,
 {
     /// The driver implementation for handling storage operations
-    devices: Vec<T>,
+    devices: Arc<Vec<T>>,
 }
 
 impl<T> NbdServer<T>
@@ -302,7 +303,7 @@ where
     ///
     /// # Returns
     /// A new `NbdServer` instance
-    pub fn new(devices: Vec<T>) -> Self {
+    pub fn new(devices: Arc<Vec<T>>) -> Self {
         // Initializing the server with zero length vec is an error, but not
         // checked here. Check in 'start'
         Self { devices }
@@ -315,7 +316,7 @@ where
 
         // Collect the names of all devices
         let mut device_names: Vec<String> = Vec::with_capacity(self.devices.len());
-        for device in &self.devices {
+        for device in &*self.devices {
             device_names.push(device.get_name());
         }
         Ok(device_names)
