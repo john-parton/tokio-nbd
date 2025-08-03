@@ -1,9 +1,8 @@
 //! Network Block Device (NBD) driver implementation and server functionality.
 //!
-//! This module provides the core components for implementing an NBD server:
+//! This module provides the core component for implementing an NBD server:
 //!
 //! - [`NbdDriver`]: A trait for implementing storage backends
-//! - [`NbdServer`]: A server implementation that handles the NBD protocol
 //!
 //! The NBD protocol enables remote access to block devices over a network connection.
 //! It consists of two phases:
@@ -12,16 +11,17 @@
 //!    capabilities and select an export (a block device to be served).
 //! 2. **Transmission phase**: Where commands like read/write operations are handled.
 //!
+//! The handshake and negotiation phases are implemented and handled using this library.
+//!
+//! The transmission phase is where the actual data transfer occurs, including read/write operations,
+//! and is therefore the trait that must be implemented by the user.
+//!
 //! # Usage
 //!
-//! To create an NBD server:
+//! Example NbdDriver which uses an in-memory storage backend:
 //!
-//! 1. Implement the [`NbdDriver`] trait for your storage backend
-//! 2. Create an instance of [`NbdServer`] with your driver
-//! 3. Call `start()` with a TcpStream to begin serving
-//!
-//! ```rust,compile_fail
-//! use tokio_nbd::driver::{NbdDriver, NbdServer};
+//! ```rust
+//! use tokio_nbd::driver::NbdDriver;
 //! use tokio_nbd::flags::ServerFeatures;
 //! use tokio_nbd::errors::{ProtocolError, OptionReplyError};
 //! use tokio::net::{TcpListener, TcpStream};
@@ -32,49 +32,6 @@
 //!     data: RwLock<Vec<u8>>,
 //! }
 //!
-//! // ... implement NbdDriver for MemoryDriver
-//!
-//! async fn start_nbd(host: &str, port: u16, driver: Arc<MemoryDriver>) -> std::io::Result<()> {
-//!     let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
-//!     println!("NBD server listening on {}:{}", host, port);
-//!
-//!     loop {
-//!         let (stream, addr) = listener.accept().await?;
-//!         println!("NBD client connected from {}", addr);
-//!
-//!         let driver = Arc::clone(&driver);
-//!
-//!         tokio::spawn(async move {
-//!             let server = NbdServer::new(driver);
-//!
-//!             if let Err(e) = server.start(stream).await {
-//!                 println!("Error starting NBD server: {:?}", e);
-//!                 return;
-//!             }
-//!         });
-//!     }
-//! }
-//!
-//! #[tokio::main]
-//! async fn main() -> std::io::Result<()> {
-//!     // Need signal handling for graceful shutdown in production code
-//!
-//!     let port: u16 = 10809; // Default NBD port
-//!
-//!     println!("Starting NBD server on port {}", port);
-//!     
-//!     // Create a driver with 1MB of storage
-//!     let driver = Arc::new(MemoryDriver {
-//!         data: RwLock::new(vec![0; 1024 * 1024]),
-//!     });
-//!
-//!     start_nbd("127.0.0.1", port, driver)
-//!         .await
-//!         .map_err(|e| {
-//!             println!("Failed to start NBD server: {:?}", e);
-//!             std::io::Error::new(std::io::ErrorKind::Other, "Failed to start NBD server")
-//!         })
-//! }
 //! ```
 //!
 //! # Protocol Compliance
@@ -306,6 +263,20 @@ pub trait NbdDriver {
         data: Vec<u8>,
     ) -> impl Future<Output = Result<(), ProtocolError>>;
 
+    /// Notifies the driver that a client is disconnecting.
+    ///
+    /// # Parameters
+    /// - `flags`: Command flags that may modify the behavior of the disconnect operation
+    ///
+    /// # Returns
+    /// - `Ok(())`: If the disconnect operation succeeds
+    /// - `Err(ProtocolError)`: If an error occurs during the disconnect operation
+    ///
+    /// # Implementation Notes
+    /// - Use this to clean up any resources associated with the client
+    /// - This is the last command sent by a client before disconnecting
+    fn disconnect(&self, flags: CommandFlags) -> impl Future<Output = Result<(), ProtocolError>>;
+
     /// Ensures all pending writes are committed to stable storage.
     ///
     /// # Parameters
@@ -318,7 +289,9 @@ pub trait NbdDriver {
     /// # Implementation Notes
     /// - If your backend doesn't need explicit flushing, you can implement this as a no-op
     /// - This operation should block until all data is safely persisted
-    fn flush(&self, flags: CommandFlags) -> impl Future<Output = Result<(), ProtocolError>>;
+    fn flush(&self, _flags: CommandFlags) -> impl Future<Output = Result<(), ProtocolError>> {
+        async move { Err(ProtocolError::CommandNotSupported) }
+    }
 
     /// Discards (trims) a range of bytes on the device.
     ///
@@ -339,10 +312,12 @@ pub trait NbdDriver {
     /// - This operation indicates that the data in the specified range is no longer needed
     fn trim(
         &self,
-        flags: CommandFlags,
-        offset: u64,
-        length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
+        _flags: CommandFlags,
+        _offset: u64,
+        _length: u32,
+    ) -> impl Future<Output = Result<(), ProtocolError>> {
+        async move { Err(ProtocolError::CommandNotSupported) }
+    }
 
     /// Writes zeroes to a range of bytes on the device.
     ///
@@ -364,25 +339,12 @@ pub trait NbdDriver {
     /// - Otherwise, consider whether to allocate and write a buffer of zeroes or to use hole punching
     fn write_zeroes(
         &self,
-        flags: CommandFlags,
-        offset: u64,
-        length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
-
-    /// Notifies the driver that a client is disconnecting.
-    ///
-    /// # Parameters
-    /// - `flags`: Command flags that may modify the behavior of the disconnect operation
-    ///
-    /// # Returns
-    /// - `Ok(())`: If the disconnect operation succeeds
-    /// - `Err(ProtocolError)`: If an error occurs during the disconnect operation
-    ///
-    /// # Implementation Notes
-    /// - Use this to clean up any resources associated with the client
-    /// - This is the last command sent by a client before disconnecting
-    fn disconnect(&self, flags: CommandFlags) -> impl Future<Output = Result<(), ProtocolError>>;
-
+        _flags: CommandFlags,
+        _offset: u64,
+        _length: u32,
+    ) -> impl Future<Output = Result<(), ProtocolError>> {
+        async move { Err(ProtocolError::CommandNotSupported) }
+    }
     /// Resizes the device to the specified size.
     ///
     /// # Parameters
@@ -400,7 +362,9 @@ pub trait NbdDriver {
         &self,
         flags: CommandFlags,
         size: u64,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
+    ) -> impl Future<Output = Result<(), ProtocolError>> {
+        async move { Err(ProtocolError::CommandNotSupported) }
+    }
 
     /// Requests that the driver cache a range of bytes for faster access.
     ///
@@ -420,7 +384,9 @@ pub trait NbdDriver {
         flags: CommandFlags,
         offset: u64,
         length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
+    ) -> impl Future<Output = Result<(), ProtocolError>> {
+        async move { Err(ProtocolError::CommandNotSupported) }
+    }
 
     /// Retrieves information about block allocation status.
     ///
@@ -442,7 +408,9 @@ pub trait NbdDriver {
         flags: CommandFlags,
         offset: u64,
         length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
+    ) -> impl Future<Output = Result<(), ProtocolError>> {
+        async move { Err(ProtocolError::CommandNotSupported) }
+    }
 }
 
 #[cfg(test)]
