@@ -717,11 +717,7 @@ where
         Ok(())
     }
 
-    fn bounds_check(
-        &self,
-        command: &CommandRequest,
-        device_size: u64,
-    ) -> bool {
+    fn bounds_check(&self, command: &CommandRequest, device_size: u64) -> bool {
         // For Read, Write, Trim, WriteZeroes, Cache, BlockStatus, we do a bounds check
         // to ensure the operation does not exceed the device size.
         let command_end = match command {
@@ -801,9 +797,7 @@ where
             let cookie = command_raw.cookie;
 
             let (flags, command) = match self.parse_command(&command_raw, read_only, device_size) {
-                Ok((flags, command)) => {
-                    (flags, command)
-                },
+                Ok((flags, command)) => (flags, command),
                 Err(e) => {
                     // Write an error reply and continue
                     let reply = SimpleReplyRaw::new(e.into(), cookie, vec![]);
@@ -811,7 +805,7 @@ where
                     writer.flush().await?;
                     continue;
                 }
-            }
+            };
 
             // There are a few edge cases we could handle here.
             // For example, a `Write` command with an empty data vector
