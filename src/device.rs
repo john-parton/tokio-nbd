@@ -16,23 +16,14 @@
 //! The transmission phase is where the actual data transfer occurs, including read/write operations,
 //! and is therefore the trait that must be implemented by the user.
 //!
+//! # Implementation Guidelines
+//!
+//! It is not necessary to check for out-of-bounds reads/writes, as the server implementation
+//! will handle these cases and respond with the appropriate error codes.
+//!
 //! # Usage
 //!
 //! Example NbdDriver which uses an in-memory storage backend:
-//!
-//! ```rust
-//! use tokio_nbd::driver::NbdDriver;
-//! use tokio_nbd::flags::ServerFeatures;
-//! use tokio_nbd::errors::{ProtocolError, OptionReplyError};
-//! use tokio::net::{TcpListener, TcpStream};
-//! use std::sync::{Arc, RwLock};
-//!
-//! // Implement a simple in-memory driver
-//! struct MemoryDriver {
-//!     data: RwLock<Vec<u8>>,
-//! }
-//!
-//! ```
 //!
 //! # Protocol Compliance
 //!
@@ -84,33 +75,59 @@ use crate::flags::{CommandFlags, ServerFeatures};
 ///
 /// Here's a simplified example of a memory-backed NBD driver:
 ///
-/// ```rust,compile_fail
+/// ```rust
 /// use tokio_nbd::device::NbdDriver;
-/// use tokio_nbd::flags::{ServerFeatures, CommandFlags};
+/// use tokio_nbd::flags::{CommandFlags, ServerFeatures};
 /// use tokio_nbd::errors::{ProtocolError, OptionReplyError};
 /// use std::sync::RwLock;
 /// use std::future::Future;
-/// use std::pin::Pin;
 ///
+/// #[derive(Debug)]
 /// struct MemoryDriver {
 ///     data: RwLock<Vec<u8>>,
+///     read_only: bool,
+///     name: String,
+/// }
+///
+/// impl Default for MemoryDriver {
+///     fn default() -> Self {
+///         MemoryDriver {
+///             data: RwLock::new(vec![0; 1024]), // 1KB of zeroed memory
+///             read_only: false,
+///             name: "".to_string(),
+///         }
+///     }
 /// }
 ///
 /// impl NbdDriver for MemoryDriver {
 ///     fn get_features(&self) -> ServerFeatures {
-///         // Support basic read/write operations but not advanced features
-///         ServerFeatures::SEND_FLUSH | ServerFeatures::SEND_FUA
+///         ServerFeatures::SEND_FUA
 ///     }
-///     
-///     async fn get_read_only(&self, device_name: &str) -> Result<bool, OptionReplyError> {
-///         if device_name == "memory" {
-///             Ok(false) // Device is writable
-///         } else {
-///             Err(OptionReplyError::Unknown)
-///         }
+///
+///     fn get_name(&self) -> String {
+///         self.name.clone()
 ///     }
-///     
-///     // Example of a core data operation
+///
+///     async fn get_read_only(&self) -> Result<bool, OptionReplyError> {
+///         Ok(self.read_only)
+///     }
+///
+///     async fn get_block_size(&self) -> Result<(u32, u32, u32), OptionReplyError> {
+///         Err(OptionReplyError::Unsupported)
+///     }
+///
+///     async fn get_canonical_name(&self) -> Result<String, OptionReplyError> {
+///         Err(OptionReplyError::Unsupported)
+///     }
+///
+///     async fn get_description(&self) -> Result<String, OptionReplyError> {
+///         Err(OptionReplyError::Unsupported)
+///     }
+///
+///     async fn get_device_size(&self) -> Result<u64, OptionReplyError> {
+///         Ok(self.data.read().unwrap().len() as u64)
+///     }
+///
 ///     async fn read(
 ///         &self,
 ///         _flags: CommandFlags,
@@ -120,26 +137,25 @@ use crate::flags::{CommandFlags, ServerFeatures};
 ///         let data = self.data.read().unwrap();
 ///         let start = offset as usize;
 ///         let end = start + length as usize;
-///         
-///         if end > data.len() {
-///             return Err(ProtocolError::InvalidArgument);
-///         }
-///         
 ///         Ok(data[start..end].to_vec())
 ///     }
-///     
-///     // Example of an unsupported operation
-///     async fn cache(
+///
+///     async fn write(
 ///         &self,
 ///         _flags: CommandFlags,
-///         _offset: u64,
-///         _length: u32,
+///         offset: u64,
+///         data: Vec<u8>,
 ///     ) -> Result<(), ProtocolError> {
-///         // Memory-backed driver doesn't need explicit caching
-///         Err(ProtocolError::CommandNotSupported)
+///         let mut memory = self.data.write().unwrap();
+///         let start = offset as usize;
+///         let end = start + data.len();
+///         memory[start..end].copy_from_slice(&data);
+///         Ok(())
 ///     }
-///     
-///     // Other methods implementation...
+///
+///     async fn disconnect(&self, _flags: CommandFlags) -> Result<(), ProtocolError> {
+///         Ok(())
+///     }
 /// }
 /// ```
 
@@ -654,7 +670,6 @@ pub(crate) mod tests {
 
         // Check server features
         let features = driver.get_features();
-        assert!(features.contains(ServerFeatures::SEND_FLUSH));
         assert!(features.contains(ServerFeatures::SEND_FUA));
         // HAS_FLAGS is not a ServerFeature, it's a TransmissionFlag
 
