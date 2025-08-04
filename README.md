@@ -6,72 +6,81 @@ Network Block Device (NBD) server with pluggable backend support using Rust and 
 
 ## Overview
 
-`tokio-nbd` is a Rust implementation of the Network Block Device (NBD) protocol that leverages the tokio asynchronous runtime. It provides a modern, high-performance, and extensible NBD server framework that can be used with various storage backends.
-
-The library implements the most of the NBD protocol specification as defined at [NetworkBlockDevice/nbd](https://github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md), including features like:
-
-- Newstyle negotiation
-- Export discovery
-- Read/write operations
-- Flush, FUA (Force Unit Access), and Trim commands
-- Write Zeroes optimization
-
-Structured replies are not implemented.
+`tokio-nbd` is a Rust implementation of the Network Block Device (NBD) protocol that leverages the tokio asynchronous runtime. It provides a modern, high-performance, and extensible NBD server implementation that can be used with various storage backends.
 
 ## Features
 
 - **Asynchronous I/O**: Built on tokio for efficient non-blocking I/O operations
-- **Pluggable Backends**: Implement the `NBDDriver` trait for custom storage systems
-- **Protocol Compliance**: Full support for the NBD protocol specification
+- **Pluggable Backends**: Implement the `NbdDriver` trait for custom storage systems
+- **Protocol Compliance**: Nearly complete support for the NBD protocol specification
 - **Type-safe Error Handling**: Well-defined error types for protocol operations
 - **Feature Negotiation**: Fine-grained control over supported protocol features
 
-## Usage
+The library implements the most of the NBD protocol specification as defined at [NetworkBlockDevice/nbd](https://github.com/NetworkBlockDevice/nbd/blob/master/doc/proto.md), with the exception of structured replies.
 
-Add `tokio-nbd` to your `Cargo.toml`:
+## Installation
 
-```toml
-[dependencies]
-tokio-nbd = "0.1.0"
-tokio = { version = "1.46.1", features = ["full"] }
-```
+Add `tokio-nbd` to your `Cargo.toml` using `cargo add tokio-nbd`
 
 ### Example: Creating a Simple In-Memory NBD Server
 
 ```rust
-use tokio_nbd::driver::{NBDDriver, NBDServer};
-use tokio_nbd::flags::ServerFeatures;
-use tokio_nbd::errors::{ProtocolError, OptionReplyError};
-use tokio::net::{TcpListener, TcpStream};
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
-// Implement a simple in-memory driver
-struct MemoryDriver {
+use tokio;
+use tokio_nbd::device::NbdDriver;
+use tokio_nbd::server::NbdServer;
+use tokio_nbd::errors::{OptionReplyError, ProtocolError};
+use tokio_nbd::flags::{CommandFlags, ServerFeatures};
+
+
+#[derive(Debug)]
+pub(crate) struct MemoryDriver {
     data: RwLock<Vec<u8>>,
+    read_only: bool,
+    name: String,
 }
 
-// Implement the NBDDriver trait for MemoryDriver
-impl NBDDriver for MemoryDriver {
-    fn get_features(&self) -> ServerFeatures {
-        // Support basic read/write operations but not advanced features
-        ServerFeatures::SEND_FLUSH | ServerFeatures::SEND_FUA
-    }
-
-    // Basic device info methods implementation
-    async fn list_devices(&self) -> Result<Vec<String>, OptionReplyError> {
-        // Only one device available
-        Ok(vec!["memory".to_string()])
-    }
-
-    async fn get_read_only(&self, device_name: &str) -> Result<bool, OptionReplyError> {
-        if device_name == "memory" {
-            Ok(false) // Device is writable
-        } else {
-            Err(OptionReplyError::Unknown)
+impl Default for MemoryDriver {
+    fn default() -> Self {
+        MemoryDriver {
+            data: RwLock::new(vec![0; 1024]), // 1KB of zeroed memory for tests
+            read_only: false,
+            name: "".to_string(),
         }
     }
+}
 
-    // Core data operations (partial implementation shown)
+impl NbdDriver for MemoryDriver {
+    fn get_features(&self) -> ServerFeatures {
+        // Support basic read/write operations but not advanced features
+        ServerFeatures::SEND_FUA
+    }
+
+    fn get_name(&self) -> String {
+        self.name.clone()
+    }
+
+    async fn get_read_only(&self) -> Result<bool, OptionReplyError> {
+        Ok(self.read_only)
+    }
+
+    async fn get_block_size(&self) -> Result<(u32, u32, u32), OptionReplyError> {
+        Err(OptionReplyError::Unsupported)
+    }
+
+    async fn get_canonical_name(&self) -> Result<String, OptionReplyError> {
+        Err(OptionReplyError::Unsupported)
+    }
+
+    async fn get_description(&self) -> Result<String, OptionReplyError> {
+        Err(OptionReplyError::Unsupported)
+    }
+
+    async fn get_device_size(&self) -> Result<u64, OptionReplyError> {
+        Ok(self.data.read().unwrap().len() as u64)
+    }
+
     async fn read(
         &self,
         _flags: CommandFlags,
@@ -82,14 +91,38 @@ impl NBDDriver for MemoryDriver {
         let start = offset as usize;
         let end = start + length as usize;
 
-        if end > data.len() {
+        // Check if read is within bounds
+        if start >= data.len() || (length > 0 && end > data.len()) {
             return Err(ProtocolError::InvalidArgument);
         }
 
         Ok(data[start..end].to_vec())
     }
 
-    // Implement other required methods...
+    async fn write(
+        &self,
+        _flags: CommandFlags,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        let mut memory = self.data.write().unwrap();
+        let start = offset as usize;
+        let end = start + data.len();
+
+        // Check if write is within bounds
+        if start >= memory.len() || (data.len() > 0 && end > memory.len()) {
+            return Err(ProtocolError::InvalidArgument);
+        }
+
+        memory[start..end].copy_from_slice(&data);
+        Ok(())
+    }
+
+    async fn disconnect(&self, _flags: CommandFlags) -> Result<(), ProtocolError> {
+        Ok(())
+    }
+
+    // Other methods implementation...
 }
 
 async fn start_nbd(host: &str, port: u16, driver: Arc<MemoryDriver>) -> std::io::Result<()> {
@@ -103,7 +136,7 @@ async fn start_nbd(host: &str, port: u16, driver: Arc<MemoryDriver>) -> std::io:
         let driver = Arc::clone(&driver);
 
         tokio::spawn(async move {
-            let server = NBDServer::new(driver);
+            let server = NbdServer::new(driver);
 
             if let Err(e) = server.start(stream).await {
                 println!("Error starting NBD server: {:?}", e);
