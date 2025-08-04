@@ -11,11 +11,7 @@ bitflags = "2.9.1"
 futures = "0.3.31"
 int-enum = "1.2.0"
 thiserror = "2.0.12"
-tokio = { version = "1.46.1", default-features = false, features = [
-    "macros",
-    "io-util",
-    "net",
-] }
+tokio = { version = "1.46.1", features = ["full"] }
 
 
 [dev-dependencies]
