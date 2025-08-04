@@ -168,7 +168,7 @@ pub trait NbdDriver {
     /// # Returns
     /// - `Ok(bool)`: `true` if the device is read-only, `false` otherwise
     /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_read_only(&self) -> impl Future<Output = Result<bool, OptionReplyError>>;
+    fn get_read_only(&self) -> impl Future<Output = Result<bool, OptionReplyError>> + Send;
 
     /// Returns the block size information for a device.
     ///
@@ -178,7 +178,9 @@ pub trait NbdDriver {
     /// # Returns
     /// - `Ok((min_block_size, preferred_block_size, max_block_size))`: Block size constraints for the device
     /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_block_size(&self) -> impl Future<Output = Result<(u32, u32, u32), OptionReplyError>>;
+    fn get_block_size(
+        &self,
+    ) -> impl Future<Output = Result<(u32, u32, u32), OptionReplyError>> + Send;
 
     /// Returns the canonical name of a device.
     ///
@@ -190,7 +192,7 @@ pub trait NbdDriver {
     /// # Returns
     /// - `Ok(String)`: The canonical device name
     /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_canonical_name(&self) -> impl Future<Output = Result<String, OptionReplyError>>;
+    fn get_canonical_name(&self) -> impl Future<Output = Result<String, OptionReplyError>> + Send;
 
     /// Returns a human-readable description of the device.
     ///
@@ -200,7 +202,7 @@ pub trait NbdDriver {
     /// # Returns
     /// - `Ok(String)`: The device description
     /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_description(&self) -> impl Future<Output = Result<String, OptionReplyError>>;
+    fn get_description(&self) -> impl Future<Output = Result<String, OptionReplyError>> + Send;
 
     /// Returns the size of a device in bytes.
     ///
@@ -210,7 +212,7 @@ pub trait NbdDriver {
     /// # Returns
     /// - `Ok(u64)`: The device size in bytes
     /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_device_size(&self) -> impl Future<Output = Result<u64, OptionReplyError>>;
+    fn get_device_size(&self) -> impl Future<Output = Result<u64, OptionReplyError>> + Send;
 
     // ----- Core Data Operations -----
 
@@ -236,7 +238,7 @@ pub trait NbdDriver {
         flags: CommandFlags,
         offset: u64,
         length: u32,
-    ) -> impl Future<Output = Result<Vec<u8>, ProtocolError>>;
+    ) -> impl Future<Output = Result<Vec<u8>, ProtocolError>> + Send;
 
     /// Writes data to the device.
     ///
@@ -260,7 +262,7 @@ pub trait NbdDriver {
         flags: CommandFlags,
         offset: u64,
         data: Vec<u8>,
-    ) -> impl Future<Output = Result<(), ProtocolError>>;
+    ) -> impl Future<Output = Result<(), ProtocolError>> + Send;
 
     /// Notifies the driver that a client is disconnecting.
     ///
@@ -274,7 +276,10 @@ pub trait NbdDriver {
     /// # Implementation Notes
     /// - Use this to clean up any resources associated with the client
     /// - This is the last command sent by a client before disconnecting
-    fn disconnect(&self, flags: CommandFlags) -> impl Future<Output = Result<(), ProtocolError>>;
+    fn disconnect(
+        &self,
+        flags: CommandFlags,
+    ) -> impl Future<Output = Result<(), ProtocolError>> + Send;
 
     /// Ensures all pending writes are committed to stable storage.
     ///
@@ -288,7 +293,10 @@ pub trait NbdDriver {
     /// # Implementation Notes
     /// - If your backend doesn't need explicit flushing, you can implement this as a no-op
     /// - This operation should block until all data is safely persisted
-    fn flush(&self, _flags: CommandFlags) -> impl Future<Output = Result<(), ProtocolError>> {
+    fn flush(
+        &self,
+        _flags: CommandFlags,
+    ) -> impl Future<Output = Result<(), ProtocolError>> + Send {
         async move { Err(ProtocolError::CommandNotSupported) }
     }
 
@@ -314,7 +322,7 @@ pub trait NbdDriver {
         _flags: CommandFlags,
         _offset: u64,
         _length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>> {
+    ) -> impl Future<Output = Result<(), ProtocolError>> + Send {
         async move { Err(ProtocolError::CommandNotSupported) }
     }
 
@@ -341,7 +349,7 @@ pub trait NbdDriver {
         _flags: CommandFlags,
         _offset: u64,
         _length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>> {
+    ) -> impl Future<Output = Result<(), ProtocolError>> + Send {
         async move { Err(ProtocolError::CommandNotSupported) }
     }
     /// Resizes the device to the specified size.
@@ -361,7 +369,7 @@ pub trait NbdDriver {
         &self,
         flags: CommandFlags,
         size: u64,
-    ) -> impl Future<Output = Result<(), ProtocolError>> {
+    ) -> impl Future<Output = Result<(), ProtocolError>> + Send {
         async move { Err(ProtocolError::CommandNotSupported) }
     }
 
@@ -383,7 +391,7 @@ pub trait NbdDriver {
         flags: CommandFlags,
         offset: u64,
         length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>> {
+    ) -> impl Future<Output = Result<(), ProtocolError>> + Send {
         async move { Err(ProtocolError::CommandNotSupported) }
     }
 
@@ -407,7 +415,7 @@ pub trait NbdDriver {
         flags: CommandFlags,
         offset: u64,
         length: u32,
-    ) -> impl Future<Output = Result<(), ProtocolError>> {
+    ) -> impl Future<Output = Result<(), ProtocolError>> + Send {
         async move { Err(ProtocolError::CommandNotSupported) }
     }
 }

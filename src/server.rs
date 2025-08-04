@@ -36,7 +36,7 @@
 //! // ... implement NbdDriver for MemoryDriver
 //!
 //! async fn start_nbd(host: &str, port: u16, driver: Arc<MemoryDriver>) -> std::io::Result<()> {
-
+//!     // Implementation details
 //! }
 //!
 //! #[tokio::main]
@@ -69,6 +69,7 @@
 //!             }
 //!         });
 //!     }
+//! }
 //! ```
 //!
 //! # Protocol Compliance
@@ -88,7 +89,7 @@
 use std::sync::Arc;
 use std::{io, vec};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 
 use crate::command_request::CommandRequest;
 use crate::device::NbdDriver;
@@ -288,7 +289,7 @@ where
 
 impl<T> NbdServer<T>
 where
-    T: NbdDriver,
+    T: NbdDriver + Send + Sync + 'static,
 {
     /// Creates a new NBD server with the given devices.
     ///
@@ -301,6 +302,61 @@ where
         // Initializing the server with zero length vec is an error, but not
         // checked here. Check in 'start'
         Self { devices }
+    }
+
+    /// Starts a TCP server that listens for NBD client connections.
+    ///
+    /// This method binds to the specified host and port, and handles incoming NBD client
+    /// connections. For each connection, it spawns a new task that runs an NBD server
+    /// instance with the provided devices. This allows handling multiple NBD clients
+    /// concurrently.
+    ///
+    /// # Parameters
+    /// - `devices`: Vector of driver implementations to serve to clients
+    /// - `host`: The hostname or IP address to bind to (e.g., "127.0.0.1", "0.0.0.0")
+    /// - `port`: Optional port number to listen on; defaults to 10809 (the standard NBD port)
+    ///
+    /// # Returns
+    /// - `Ok(())`: The server will run indefinitely unless an error occurs
+    /// - `Err(std::io::Error)`: If binding to the socket fails or another I/O error occurs
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use tokio_nbd::server::NbdServer;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> std::io::Result<()> {
+    ///     // Create your driver implementations
+    ///     let devices = vec![/* your NBD driver implementations */];
+    ///
+    ///     // Start the server on all interfaces, default NBD port
+    ///     NbdServer::listen(devices, "0.0.0.0", None).await
+    /// }
+    /// ```
+    ///
+    /// This method runs indefinitely. To handle graceful shutdown, consider
+    /// running it in a separate task and implementing signal handling.
+    pub async fn listen(devices: Vec<T>, host: &str, port: Option<u16>) -> std::io::Result<()> {
+        let port = port.unwrap_or(10809);
+        let devices = Arc::new(devices);
+        let listener = TcpListener::bind(format!("{host}:{port}")).await?;
+
+        loop {
+            let (stream, addr) = listener.accept().await?;
+            println!("NBD client connected from {}", addr);
+
+            let devices = Arc::clone(&devices);
+
+            tokio::spawn(async move {
+                let server = NbdServer::new(devices);
+
+                if let Err(e) = server.start(stream).await {
+                    println!("Error starting NBD server: {:?}", e);
+                    return;
+                }
+            });
+        }
     }
 
     async fn list_devices(&self) -> Result<Vec<String>, OptionReplyError> {
