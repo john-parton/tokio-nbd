@@ -4,27 +4,6 @@
 //!
 //! - [`NbdDriver`]: A trait for implementing storage backends
 //!
-//! The NBD protocol enables remote access to block devices over a network connection.
-//! It consists of two phases:
-//!
-//! 1. **Handshake and negotiation phase**: Where the server and client establish
-//!    capabilities and select an export (a block device to be served).
-//! 2. **Transmission phase**: Where commands like read/write operations are handled.
-//!
-//! The handshake and negotiation phases are implemented and handled using this library.
-//!
-//! The transmission phase is where the actual data transfer occurs, including read/write operations,
-//! and is therefore the trait that must be implemented by the user.
-//!
-//! # Implementation Guidelines
-//!
-//! It is not necessary to check for out-of-bounds reads/writes, as the server implementation
-//! will handle these cases and respond with the appropriate error codes.
-//!
-//! # Usage
-//!
-//! Example NbdDriver which uses an in-memory storage backend:
-//!
 //! # Protocol Compliance
 //!
 //! This implementation follows the NBD protocol specification as defined at
@@ -47,7 +26,7 @@ use crate::flags::{CommandFlags, ServerFeatures};
 /// This trait defines the interface that must be implemented to provide
 /// a functional NBD server. Implementors of this trait will handle the
 /// actual storage operations, while the NBD protocol handling is
-/// provided by the `NbdServer`.
+/// provided by the [`crate::server::NbdServer`].
 ///
 /// # Implementation Guidelines
 ///
@@ -55,15 +34,19 @@ use crate::flags::{CommandFlags, ServerFeatures};
 ///
 /// 1. Consider which server features you want to support and expose them
 ///    via the `get_features()` method
-/// 2. For features you don't support, return `ProtocolError::CommandNotSupported`
-///    from the corresponding method
-/// 3. Implement proper error handling for all methods
-/// 4. Consider thread safety if your implementation will be shared across threads
+/// 2. Implement the required methods to handle the transmission phase: read, write, and disconnect.
+/// 3. Implement the required methods to provide device metadata: get_name, get_read_only, get_block_size,
+///    get_canonical_name, get_description, and get_device_size.
+/// 4. Implement proper error handling for all methods
+/// 5. Consider thread safety if your implementation will be shared across threads
+/// 6. Optionally implement additional methods as needed for your storage backend
 ///
 /// # Default Implementations
 ///
-/// For many methods, if your driver doesn't support the functionality, you should
-/// return `ProtocolError::CommandNotSupported`. This is particularly common for:
+/// For many methods, if your driver doesn't support the functionality, you do not need to implement it yourself:
+/// the default implementation will return `Err(ProtocolError::CommandNotSupported)` for many methods.
+///
+/// In particular, the following methods can be left unimplemented if not needed:
 ///
 /// - `cache`: Many backends don't need explicit caching
 /// - `trim`: Not all storage systems support hole punching

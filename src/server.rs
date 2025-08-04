@@ -21,7 +21,8 @@
 //! 3. Call `start()` with a TcpStream to begin serving
 //!
 //! ```rust,compile_fail
-//! use tokio_nbd::driver::{NbdDriver, NbdServer};
+//! use tokio_nbd::device::NbdDriver;
+//! use tokio_nbd::server::NbdServer;
 //! use tokio_nbd::flags::ServerFeatures;
 //! use tokio_nbd::errors::{ProtocolError, OptionReplyError};
 //! use tokio::net::{TcpListener, TcpStream};
@@ -35,6 +36,21 @@
 //! // ... implement NbdDriver for MemoryDriver
 //!
 //! async fn start_nbd(host: &str, port: u16, driver: Arc<MemoryDriver>) -> std::io::Result<()> {
+
+//! }
+//!
+//! #[tokio::main]
+//! async fn main() -> std::io::Result<()> {
+//!     // Need signal handling for graceful shutdown in production code
+//!
+//!     let port: u16 = 10809; // Default NBD port
+//!
+//!     println!("Starting NBD server on port {}", port);
+//!     
+//!     // Create a driver with 1MB of storage
+//!     let driver = Arc::new(MemoryDriver {
+//!         data: RwLock::new(vec![0; 1024 * 1024]),
+//!     });
 //!     let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
 //!     println!("NBD server listening on {}:{}", host, port);
 //!
@@ -53,28 +69,6 @@
 //!             }
 //!         });
 //!     }
-//! }
-//!
-//! #[tokio::main]
-//! async fn main() -> std::io::Result<()> {
-//!     // Need signal handling for graceful shutdown in production code
-//!
-//!     let port: u16 = 10809; // Default NBD port
-//!
-//!     println!("Starting NBD server on port {}", port);
-//!     
-//!     // Create a driver with 1MB of storage
-//!     let driver = Arc::new(MemoryDriver {
-//!         data: RwLock::new(vec![0; 1024 * 1024]),
-//!     });
-//!
-//!     start_nbd("127.0.0.1", port, driver)
-//!         .await
-//!         .map_err(|e| {
-//!             println!("Failed to start NBD server: {:?}", e);
-//!             std::io::Error::new(std::io::ErrorKind::Other, "Failed to start NBD server")
-//!         })
-//! }
 //! ```
 //!
 //! # Protocol Compliance
