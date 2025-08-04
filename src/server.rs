@@ -807,6 +807,17 @@ where
         }
     }
 
+    fn check_noop(&self, command: &CommandRequest) -> bool {
+        match command {
+            CommandRequest::Read(_, 0)
+            | CommandRequest::Cache(_, 0)
+            | CommandRequest::Trim(_, 0)
+            | CommandRequest::WriteZeroes(_, 0) => true,
+            CommandRequest::Write(_, data) if data.is_empty() => true,
+            _ => false,
+        }
+    }
+
     /// Handles NBD commands during the transmission phase.
     ///
     /// This method is responsible for processing NBD commands after option
@@ -860,11 +871,17 @@ where
                 }
             };
 
-            // There are a few edge cases we could handle here.
-            // For example, a `Write` command with an empty data vector
-            // could be treated as a no-op.
-            // A `Read` command with a length of 0 could return an empty vector,
-            // without consulting the device.
+            // A few edge cases we handle here.
+            // For example, a `Write` command with an empty data vector,
+            // A `Read` command with a length of 0,
+            // and so on
+            if self.check_noop(&command) {
+                // If the command is a no-op, we can skip processing it
+                let reply = SimpleReplyRaw::new(0, cookie, vec![]);
+                reply.write(writer).await?;
+                writer.flush().await?;
+                continue;
+            }
 
             let result = match command {
                 // Disconnection is the only operation without a reply
