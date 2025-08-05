@@ -18,6 +18,8 @@
 //! - Use firewall rules to restrict access
 //!
 
+use std::sync::atomic::AtomicU64;
+
 use crate::errors::{OptionReplyError, ProtocolError};
 use crate::flags::{CommandFlags, ServerFeatures};
 
@@ -206,13 +208,15 @@ pub trait NbdDriver {
 
     /// Returns the size of a device in bytes.
     ///
+    /// Note that this method is synchronous and should not be async. Consider using
+    /// #[inline] as well
+    ///
     /// # Parameters
     /// - `device_name`: The name of the device
     ///
     /// # Returns
-    /// - `Ok(u64)`: The device size in bytes
-    /// - `Err(OptionReplyError)`: If the device doesn't exist or another error occurs
-    fn get_device_size(&self) -> impl Future<Output = Result<u64, OptionReplyError>> + Send;
+    /// - `u64`: The size of the device in bytes
+    fn get_device_size(&self) -> AtomicU64;
 
     // ----- Core Data Operations -----
 
@@ -354,6 +358,9 @@ pub trait NbdDriver {
     }
     /// Resizes the device to the specified size.
     ///
+    /// Note: self is mutable because resizing may change the internal state of the driver,
+    /// in particular, get_device_size() may return a different value after resizing.
+    ///
     /// # Parameters
     /// - `flags`: Command flags that may modify the behavior of the resize operation
     /// - `size`: The new size of the device in bytes
@@ -477,8 +484,8 @@ pub(crate) mod tests {
             Err(OptionReplyError::Unsupported)
         }
 
-        async fn get_device_size(&self) -> Result<u64, OptionReplyError> {
-            Ok(self.data.read().unwrap().len() as u64)
+        fn get_device_size(&self) -> u64 {
+            self.data.read().unwrap().len() as u64
         }
 
         async fn read(
@@ -631,7 +638,7 @@ pub(crate) mod tests {
         let driver = MemoryDriver::default();
 
         // Check device size
-        let size = driver.get_device_size().await.unwrap();
+        let size = driver.get_device_size();
         assert_eq!(size, 1024);
 
         // Check read-only status
