@@ -87,6 +87,7 @@
 //!
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::{io, vec};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
@@ -554,7 +555,7 @@ where
                 // We should probably store which information types were explicitly requested and
                 // expose that information to the driver
                 responses.push(OptionReply::Info(InfoPayload::Export(
-                    size.into_inner(),
+                    size.load(Ordering::SeqCst),
                     flags,
                 )));
                 responses.push(OptionReply::Info(InfoPayload::Name(name.clone())));
@@ -859,7 +860,7 @@ where
             let (flags, command) = match self.parse_command(
                 &command_raw,
                 read_only,
-                device.get_device_size().into_inner(),
+                device.get_device_size().load(Ordering::SeqCst),
             ) {
                 Ok((flags, command)) => (flags, command),
                 Err(e) => {

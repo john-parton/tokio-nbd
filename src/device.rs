@@ -216,7 +216,7 @@ pub trait NbdDriver {
     ///
     /// # Returns
     /// - `u64`: The size of the device in bytes
-    fn get_device_size(&self) -> AtomicU64;
+    fn get_device_size(&self) -> &AtomicU64;
 
     // ----- Core Data Operations -----
 
