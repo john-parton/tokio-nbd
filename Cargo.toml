@@ -10,7 +10,15 @@ repository = "https://github.com/john-parton/tokio-nbd"
 bitflags = "2.9.1"
 int-enum = "1.2.0"
 thiserror = "2.0.12"
-tokio = { version = "1.46.1", features = ["full"] }
+tokio = { version = "1.46.1", features = [
+    "io-std",
+    "io-util",
+    "macros",
+    "net",
+    "rt",
+    "rt-multi-thread",
+    "signal",
+] }
 
 
 [dev-dependencies]
