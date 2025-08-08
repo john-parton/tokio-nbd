@@ -1,17 +1,27 @@
 [package]
 name = "tokio-nbd"
 description = "Network Block Device (NBD) server with pluggable backend support using Rust and the tokio runtime"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "GPL-2.0-or-later"
 repository = "https://github.com/john-parton/tokio-nbd"
 
 [dependencies]
 bitflags = "2.9.1"
-futures = "0.3.31"
+bon = "3.6.5"
 int-enum = "1.2.0"
 thiserror = "2.0.12"
-tokio = { version = "1.46.1", features = ["full"] }
+tokio = { version = "1.46.1", features = [
+    "io-std",
+    "io-util",
+    "macros",
+    "net",
+    "rt",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
 
 
 [dev-dependencies]
