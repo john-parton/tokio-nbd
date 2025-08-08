@@ -739,38 +739,6 @@ where
         }
     }
 
-    fn check_command(
-        &self,
-        command: &CommandRequest,
-        read_only: bool,
-        device_size: u64,
-    ) -> Result<(), ProtocolError> {
-        // If the device is read-only, we should not allow write operations
-        if read_only && command.is_write_command() {
-            // If the command requires write access but the device is read-only,
-            // write an error reply and continue
-            return Err(ProtocolError::CommandNotPermitted);
-        }
-
-        // For Read, Write, Trim, WriteZeroes, Cache, BlockStatus, we do a bounds check
-        // to ensure the operation does not exceed the device size.
-        let command_end = match command {
-            CommandRequest::Read(offset, length)
-            | CommandRequest::Trim(offset, length)
-            | CommandRequest::WriteZeroes(offset, length)
-            | CommandRequest::Cache(offset, length)
-            | CommandRequest::BlockStatus(offset, length) => offset + *length as u64,
-            CommandRequest::Write(offset, data) => offset + data.len() as u64,
-            _ => return Ok(()),
-        };
-
-        if command_end > device_size {
-            return Err(ProtocolError::ValueTooLarge);
-        }
-
-        Ok(())
-    }
-
     fn bounds_check(&self, command: &CommandRequest, device_size: u64) -> bool {
         // For Read, Write, Trim, WriteZeroes, Cache, BlockStatus, we do a bounds check
         // to ensure the operation does not exceed the device size.
