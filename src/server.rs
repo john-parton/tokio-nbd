@@ -86,11 +86,17 @@
 //! - Use firewall rules to restrict access
 //!
 
+use bon::Builder;
+use bon::bon;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use std::{io, vec};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::signal;
+use tokio::sync::oneshot;
+use tokio::time::sleep;
 
 use crate::command_request::CommandRequest;
 use crate::device::NbdDriver;
@@ -271,40 +277,22 @@ where
     End(SelectedDevice<'a, T>),
 }
 
-/// The main NBD server implementation.
-///
-/// Handles the NBD protocol including handshake, option negotiation,
-/// and command processing. Uses a generic `NbdDriver` implementation to
-/// perform the actual storage operations.
-///
-/// # Type Parameters
-///
-/// - `T`: A type that implements the `NbdDriver` trait
-pub struct NbdServer<T>
+#[derive(Builder)]
+pub struct NbdServerBuilder<'a, T>
 where
-    T: NbdDriver,
+    T: NbdDriver + 'static,
 {
-    /// The driver implementation for handling storage operations
+    #[builder(with = |devices: Vec<T>| Arc::new(devices))]
     devices: Arc<Vec<T>>,
+    host: &'a str,
+    port: Option<u16>,
+    shutdown_timeout: Option<u64>,
 }
 
-impl<T> NbdServer<T>
+impl<'a, T> NbdServerBuilder<'a, T>
 where
     T: NbdDriver + Send + Sync + 'static,
 {
-    /// Creates a new NBD server with the given devices.
-    ///
-    /// # Parameters
-    /// - `devices`: The driver implementations to use for storage operations
-    ///
-    /// # Returns
-    /// A new `NbdServer` instance
-    pub fn new(devices: Arc<Vec<T>>) -> Self {
-        // Initializing the server with zero length vec is an error, but not
-        // checked here. Check in 'start'
-        Self { devices }
-    }
-
     /// Starts a TCP server that listens for NBD client connections.
     ///
     /// This method binds to the specified host and port, and handles incoming NBD client
@@ -321,45 +309,190 @@ where
     /// - `Ok(())`: The server will run indefinitely unless an error occurs
     /// - `Err(std::io::Error)`: If binding to the socket fails or another I/O error occurs
     ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use tokio_nbd::server::NbdServer;
-    ///
-    /// #[tokio::main]
-    /// async fn main() -> std::io::Result<()> {
-    ///     // Create your driver implementations
-    ///     let devices = vec![/* your NBD driver implementations */];
-    ///
-    ///     // Start the server on all interfaces, default NBD port
-    ///     NbdServer::listen(devices, "0.0.0.0", None).await
-    /// }
-    /// ```
-    ///
     /// This method runs indefinitely. To handle graceful shutdown, consider
     /// running it in a separate task and implementing signal handling.
-    pub async fn listen(devices: Vec<T>, host: &str, port: Option<u16>) -> std::io::Result<()> {
-        let port = port.unwrap_or(10809);
-        let devices = Arc::new(devices);
-        let listener = TcpListener::bind(format!("{host}:{port}")).await?;
+    pub async fn listen(&self) -> std::io::Result<()> {
+        let port = self.port.unwrap_or(10809);
+        let shutdown_timeout = self.shutdown_timeout.unwrap_or(60); // Default 60 seconds
+        let listener = TcpListener::bind(format!("{}:{}", self.host, port)).await?;
+
+        // Create a watch channel for shutdown signaling
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let shutdown_rx = Arc::new(shutdown_rx);
+
+        // Track active connections with a counter
+        let active_connections = Arc::new(AtomicUsize::new(0));
+
+        println!("NBD server starting on {}:{}", self.host, port);
+
+        // Keep references for join handles and signal handling
+        let connections_counter = Arc::clone(&active_connections);
+
+        // Create a channel to signal the accept loop to stop
+        let (accept_loop_stop_tx, mut accept_loop_stop_rx) = oneshot::channel();
+        let mut accept_loop_stop_tx = Some(accept_loop_stop_tx);
+
+        let devices = self.devices.clone();
+
+        // Spawn the accept loop
+        let handle = tokio::spawn({
+            let rx = shutdown_rx.clone();
+            async move {
+                loop {
+                    // Check if we should stop accepting new connections
+                    if *rx.borrow() {
+                        println!("Server is shutting down, no longer accepting new connections");
+                        break;
+                    }
+
+                    // Use select to either accept a connection or receive shutdown signal
+                    tokio::select! {
+                        accept_result = listener.accept() => {
+                            match accept_result {
+                                Ok((stream, addr)) => {
+                                    println!("NBD client connected from {}", addr);
+
+                                    // Increment active connections counter
+                                    active_connections.fetch_add(1, Ordering::SeqCst);
+
+                                    let devices = Arc::clone(&devices);
+                                    let shutdown_signal = Arc::clone(&shutdown_rx);
+                                    let connection_counter = Arc::clone(&active_connections);
+                                    let server = NbdServer {
+                                        devices,
+                                        shutdown_signal,
+                                    };
+
+                                    tokio::spawn(async move {
+
+                                        if let Err(e) = server.start(stream).await {
+                                            println!("Error in NBD server session: {:?}", e);
+                                        }
+
+                                        // Decrement connection counter when done
+                                        connection_counter.fetch_sub(1, Ordering::SeqCst);
+                                    });
+                                }
+                                Err(e) => {
+                                    println!("Failed to accept connection: {}", e);
+                                    if e.kind() == io::ErrorKind::ConnectionAborted {
+                                        // This can happen during shutdown, not fatal
+                                        continue;
+                                    } else {
+                                        // Something unrecoverable probably happened
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        // We use the oneshot channel for direct shutdown notification
+                        _ = &mut accept_loop_stop_rx => {
+                            println!("Received direct shutdown signal, stopping accept loop");
+                            break;
+                        }
+                    }
+
+                    // Check for shutdown flag after each iteration
+                    if *rx.borrow() {
+                        println!("Detected shutdown signal, stopping accept loop");
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Set up signal handlers
+        let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("Failed to create SIGTERM signal handler");
+
+        let mut sighup = signal::unix::signal(signal::unix::SignalKind::hangup())
+            .expect("Failed to create SIGHUP signal handler");
+
+        // Wait for shutdown signal
+        tokio::select! {
+            result = handle => {
+                // Accept loop stopped on its own due to an error
+                println!("Accept loop stopped unexpectedly");
+                result?;
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("Received Ctrl+C signal, initiating graceful shutdown");
+                // Signal shutdown intent
+                let _ = shutdown_tx.send(true);
+                // Stop accepting new connections directly
+                if let Some(tx) = accept_loop_stop_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+            _ = sigterm.recv() => {
+                println!("Received SIGTERM signal, initiating graceful shutdown");
+                let _ = shutdown_tx.send(true);
+                if let Some(tx) = accept_loop_stop_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+            _ = sighup.recv() => {
+                println!("Received SIGHUP signal, initiating graceful shutdown");
+                let _ = shutdown_tx.send(true);
+                if let Some(tx) = accept_loop_stop_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+        };
+
+        // Start the graceful shutdown process
+        println!("Starting graceful shutdown");
+
+        // Wait for active connections to finish with timeout
+        let shutdown_deadline = tokio::time::Instant::now() + Duration::from_secs(shutdown_timeout);
 
         loop {
-            let (stream, addr) = listener.accept().await?;
-            println!("NBD client connected from {}", addr);
+            let remaining = connections_counter.load(Ordering::SeqCst);
+            if remaining == 0 {
+                println!("All connections closed, shutdown complete");
+                break;
+            }
 
-            let devices = Arc::clone(&devices);
+            if tokio::time::Instant::now() >= shutdown_deadline {
+                println!(
+                    "Shutdown timeout reached with {} connections still active",
+                    remaining
+                );
+                break;
+            }
 
-            tokio::spawn(async move {
-                let server = NbdServer::new(devices);
-
-                if let Err(e) = server.start(stream).await {
-                    println!("Error starting NBD server: {:?}", e);
-                    return;
-                }
-            });
+            println!("Waiting for {} active connections to close...", remaining);
+            sleep(Duration::from_secs(1)).await;
         }
-    }
 
+        println!("Server shutdown complete");
+        Ok(())
+    }
+}
+
+/// The main NBD server implementation.
+///
+/// Handles the NBD protocol including handshake, option negotiation,
+/// and command processing. Uses a generic `NbdDriver` implementation to
+/// perform the actual storage operations.
+///
+/// # Type Parameters
+///
+/// - `T`: A type that implements the `NbdDriver` trait
+pub struct NbdServer<T>
+where
+    T: NbdDriver,
+{
+    /// The driver implementation for handling storage operations
+    devices: Arc<Vec<T>>,
+    /// Shutdown signal receiver that can be cloned and shared among server instances
+    shutdown_signal: Arc<tokio::sync::watch::Receiver<bool>>,
+}
+
+impl<T> NbdServer<T>
+where
+    T: NbdDriver + Send + Sync + 'static,
+{
     async fn list_devices(&self) -> Result<Vec<String>, OptionReplyError> {
         if self.devices.is_empty() {
             return Err(OptionReplyError::UnknownExport);
@@ -692,6 +825,23 @@ where
                 Ok(req) => req,
             };
 
+            // Check to see if server is in shutdown state
+            if *self.shutdown_signal.borrow() {
+                dbg!("Server is shutting down, aborting option negotiation");
+                // Let the client know we've shut down
+                self.write_option_reply_error(
+                    writer,
+                    request_raw.option,
+                    OptionReplyError::Shutdown,
+                )
+                .await?;
+                // Not actually an IO error?
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Server is shutting down",
+                ));
+            }
+
             dbg!("Parsed option request: {:?}", &request);
 
             match self.handle_option_request(&request).await {
@@ -839,6 +989,24 @@ where
                     continue;
                 }
             };
+
+            // Check if server is shutdown
+            if *self.shutdown_signal.borrow() {
+                dbg!("Server is shutting down, aborting command processing");
+                let reply =
+                    SimpleReplyRaw::new(ProtocolError::ServerShuttingDown.into(), cookie, vec![]);
+                reply.write(writer).await?;
+                writer.flush().await?;
+                // Gracefully shutdown device
+                device
+                    .disconnect(flags)
+                    .await
+                    .expect("Failed to disconnect");
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Server is shutting down",
+                ));
+            }
 
             // A few edge cases we handle here.
             // For example, a `Write` command with an empty data vector,
