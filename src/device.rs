@@ -64,11 +64,12 @@ use crate::flags::{CommandFlags, ServerFeatures};
 /// use tokio_nbd::device::NbdDriver;
 /// use tokio_nbd::flags::{CommandFlags, ServerFeatures};
 /// use tokio_nbd::errors::{ProtocolError, OptionReplyError};
-/// use std::sync::RwLock;
-/// use std::future::Future;
+/// use tokio::sync::RwLock;
+/// use std::sync::atomic::AtomicU64;
 ///
 /// #[derive(Debug)]
 /// struct MemoryDriver {
+///     size: AtomicU64,
 ///     data: RwLock<Vec<u8>>,
 ///     read_only: bool,
 ///     name: String,
@@ -77,6 +78,7 @@ use crate::flags::{CommandFlags, ServerFeatures};
 /// impl Default for MemoryDriver {
 ///     fn default() -> Self {
 ///         MemoryDriver {
+///             size: AtomicU64::new(1024), // 1KB
 ///             data: RwLock::new(vec![0; 1024]), // 1KB of zeroed memory
 ///             read_only: false,
 ///             name: "".to_string(),
@@ -86,7 +88,7 @@ use crate::flags::{CommandFlags, ServerFeatures};
 ///
 /// impl NbdDriver for MemoryDriver {
 ///     fn get_features(&self) -> ServerFeatures {
-///         ServerFeatures::SEND_FUA
+///         ServerFeatures::SEND_FUA | ServerFeatures::SEND_RESIZE
 ///     }
 ///
 ///     fn get_name(&self) -> String {
@@ -109,8 +111,8 @@ use crate::flags::{CommandFlags, ServerFeatures};
 ///         Err(OptionReplyError::Unsupported)
 ///     }
 ///
-///     async fn get_device_size(&self) -> Result<u64, OptionReplyError> {
-///         Ok(self.data.read().unwrap().len() as u64)
+///     fn get_device_size(&self) -> &AtomicU64 {
+///         &self.size
 ///     }
 ///
 ///     async fn read(
@@ -119,7 +121,7 @@ use crate::flags::{CommandFlags, ServerFeatures};
 ///         offset: u64,
 ///         length: u32,
 ///     ) -> Result<Vec<u8>, ProtocolError> {
-///         let data = self.data.read().unwrap();
+///         let data = self.data.read().await;
 ///         let start = offset as usize;
 ///         let end = start + length as usize;
 ///         Ok(data[start..end].to_vec())
@@ -131,7 +133,7 @@ use crate::flags::{CommandFlags, ServerFeatures};
 ///         offset: u64,
 ///         data: Vec<u8>,
 ///     ) -> Result<(), ProtocolError> {
-///         let mut memory = self.data.write().unwrap();
+///         let mut memory = self.data.write().await;
 ///         let start = offset as usize;
 ///         let end = start + data.len();
 ///         memory[start..end].copy_from_slice(&data);
@@ -208,14 +210,11 @@ pub trait NbdDriver {
 
     /// Returns the size of a device in bytes.
     ///
-    /// Note that this method is synchronous and should not be async. Consider using
-    /// #[inline] as well
-    ///
     /// # Parameters
     /// - `device_name`: The name of the device
     ///
     /// # Returns
-    /// - `u64`: The size of the device in bytes
+    /// - `Result<u64, OptionReplyError>`: The size of the device in bytes
     fn get_device_size(&self) -> &AtomicU64;
 
     // ----- Core Data Operations -----
@@ -439,10 +438,12 @@ pub(crate) mod tests {
 
     use tokio;
 
-    use std::sync::RwLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::sync::RwLock;
 
     #[derive(Debug)]
     pub(crate) struct MemoryDriver {
+        size: AtomicU64,
         data: RwLock<Vec<u8>>,
         read_only: bool,
         name: String,
@@ -451,7 +452,8 @@ pub(crate) mod tests {
     impl Default for MemoryDriver {
         fn default() -> Self {
             MemoryDriver {
-                data: RwLock::new(vec![0; 1024]), // 1KB of zeroed memory for tests
+                size: AtomicU64::new(1024), // 1KB of zeroed memory for tests
+                data: RwLock::new(vec![0; 1024]),
                 read_only: false,
                 name: "".to_string(),
             }
@@ -461,7 +463,7 @@ pub(crate) mod tests {
     impl NbdDriver for MemoryDriver {
         fn get_features(&self) -> ServerFeatures {
             // Support basic read/write operations but not advanced features
-            ServerFeatures::SEND_FUA
+            ServerFeatures::SEND_FUA | ServerFeatures::SEND_RESIZE
         }
 
         fn get_name(&self) -> String {
@@ -484,8 +486,8 @@ pub(crate) mod tests {
             Err(OptionReplyError::Unsupported)
         }
 
-        fn get_device_size(&self) -> u64 {
-            self.data.read().unwrap().len() as u64
+        fn get_device_size(&self) -> &AtomicU64 {
+            &self.size
         }
 
         async fn read(
@@ -494,14 +496,16 @@ pub(crate) mod tests {
             offset: u64,
             length: u32,
         ) -> Result<Vec<u8>, ProtocolError> {
-            let data = self.data.read().unwrap();
+            // Check if read is within bounds
+            // Driver doesn't usually need to do this, this is just for tests
+            if offset + length as u64 >= self.size.load(Ordering::Acquire) {
+                return Err(ProtocolError::InvalidArgument);
+            }
+
             let start = offset as usize;
             let end = start + length as usize;
 
-            // Check if read is within bounds
-            if start >= data.len() || (length > 0 && end > data.len()) {
-                return Err(ProtocolError::InvalidArgument);
-            }
+            let data = self.data.read().await;
 
             Ok(data[start..end].to_vec())
         }
@@ -512,14 +516,16 @@ pub(crate) mod tests {
             offset: u64,
             data: Vec<u8>,
         ) -> Result<(), ProtocolError> {
-            let mut memory = self.data.write().unwrap();
-            let start = offset as usize;
-            let end = start + data.len();
-
             // Check if write is within bounds
-            if start >= memory.len() || (data.len() > 0 && end > memory.len()) {
+
+            // Driver doesn't usually need to do this, this is just for tests
+            if offset + data.len() as u64 >= self.size.load(Ordering::Acquire) {
                 return Err(ProtocolError::InvalidArgument);
             }
+
+            let mut memory = self.data.write().await;
+            let start = offset as usize;
+            let end = start + data.len();
 
             memory[start..end].copy_from_slice(&data);
             Ok(())
@@ -527,6 +533,28 @@ pub(crate) mod tests {
 
         async fn disconnect(&self, _flags: CommandFlags) -> Result<(), ProtocolError> {
             Ok(())
+        }
+
+        async fn resize(&self, _flags: CommandFlags, size: u64) -> Result<(), ProtocolError> {
+            let current_size = self.size.load(Ordering::Acquire);
+
+            match size.cmp(&current_size) {
+                std::cmp::Ordering::Equal => {
+                    // No change needed
+                    Ok(())
+                }
+                std::cmp::Ordering::Less => {
+                    // Cannot shrink the device size
+                    Err(ProtocolError::CommandNotSupported)
+                }
+                std::cmp::Ordering::Greater => {
+                    // Lock current memory
+                    let mut memory = self.data.write().await;
+                    memory.resize(size as usize, 0);
+                    self.size.store(size, Ordering::Release);
+                    Ok(())
+                }
+            }
         }
 
         // Other methods implementation...
@@ -559,7 +587,26 @@ pub(crate) mod tests {
         let driver = MemoryDriver::default();
 
         let resize_result = driver.resize(CommandFlags::empty(), 2048).await;
-        assert_eq!(resize_result, Err(ProtocolError::CommandNotSupported));
+        assert!(resize_result.is_ok());
+
+        // Verify the new size is reflected
+        let new_size = driver.get_device_size().load(Ordering::Acquire);
+        assert_eq!(new_size, 2048);
+
+        // Verify we can now read/write beyond the original size
+        let write_data = vec![42; 100];
+        let write_result = driver
+            .write(CommandFlags::empty(), 1500, write_data.clone())
+            .await;
+        assert!(write_result.is_ok());
+
+        // Read back the data we just wrote
+        let read_result = driver.read(CommandFlags::empty(), 1500, 100).await;
+        assert_eq!(read_result, Ok(write_data));
+
+        // Test that shrinking isn't supported
+        let shrink_result = driver.resize(CommandFlags::empty(), 1024).await;
+        assert_eq!(shrink_result, Err(ProtocolError::CommandNotSupported));
     }
 
     #[tokio::test]
@@ -638,7 +685,7 @@ pub(crate) mod tests {
         let driver = MemoryDriver::default();
 
         // Check device size
-        let size = driver.get_device_size();
+        let size = driver.get_device_size().load(Ordering::Acquire);
         assert_eq!(size, 1024);
 
         // Check read-only status

@@ -36,7 +36,7 @@
 //! // ... implement NbdDriver for MemoryDriver
 //!
 //! async fn start_nbd(host: &str, port: u16, driver: Arc<MemoryDriver>) -> std::io::Result<()> {
-//!     // Implementation details
+
 //! }
 //!
 //! #[tokio::main]
@@ -246,6 +246,10 @@ where
     // This let's us implement the check to forbid
     // write commands on a read-only device.
     read_only: bool,
+    /// The size of the device in bytes
+    /// This is so that we can do automatic bounds checking
+    /// without requiring implementors to check it themselves
+    size: u64,
     name: String,
 }
 
@@ -412,14 +416,14 @@ where
         self.handle_handshake(&mut reader, &mut writer).await?;
         dbg!("Starting options negotiation");
         let selected_device = self.handle_options(&mut reader, &mut writer).await?;
-
         dbg!("Starting command handling");
         // Function signature is getting too long
         self.handle_commands(
-            selected_device.device,
+            &selected_device.device,
             &mut reader,
             &mut writer,
             selected_device.read_only,
+            selected_device.size,
         )
         .await?;
         Ok(())
@@ -543,7 +547,7 @@ where
                 let mut flags: TransmissionFlags = device.get_features().into();
 
                 let read_only = device.get_read_only().await?;
-                let size = device.get_device_size();
+                let size = device.get_device_size().load(Ordering::Acquire);
 
                 // A separate method to make the driver API cleaner
                 if read_only {
@@ -554,10 +558,7 @@ where
                 // The client may or may not honor it, but some don't request it at all and just move on
                 // We should probably store which information types were explicitly requested and
                 // expose that information to the driver
-                responses.push(OptionReply::Info(InfoPayload::Export(
-                    size.load(Ordering::SeqCst),
-                    flags,
-                )));
+                responses.push(OptionReply::Info(InfoPayload::Export(size, flags)));
                 responses.push(OptionReply::Info(InfoPayload::Name(name.clone())));
                 responses.push(OptionReply::Info(InfoPayload::Description(
                     device.get_description().await?,
@@ -573,6 +574,7 @@ where
                         OptionReplyFinalize::End(SelectedDevice {
                             device: &device,
                             read_only,
+                            size,
                             name: name.clone(),
                         }),
                     ));
@@ -592,6 +594,7 @@ where
                     OptionReplyFinalize::End(SelectedDevice {
                         device: &device,
                         read_only: device.get_read_only().await?,
+                        size: device.get_device_size().load(Ordering::Acquire),
                         name: name.clone(),
                     }),
                 ));
@@ -847,6 +850,7 @@ where
         reader: &mut R,
         writer: &mut W,
         read_only: bool,
+        device_size: u64,
     ) -> io::Result<()>
     where
         R: AsyncReadExt + Unpin,
@@ -857,11 +861,7 @@ where
 
             let cookie = command_raw.cookie;
 
-            let (flags, command) = match self.parse_command(
-                &command_raw,
-                read_only,
-                device.get_device_size().load(Ordering::SeqCst),
-            ) {
+            let (flags, command) = match self.parse_command(&command_raw, read_only, device_size) {
                 Ok((flags, command)) => (flags, command),
                 Err(e) => {
                     // Write an error reply and continue
