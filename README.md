@@ -25,12 +25,12 @@ Add `tokio-nbd` to your `Cargo.toml` using `cargo add tokio-nbd`
 ### Example: Creating a Simple In-Memory NBD Server
 
 ```rust
-use std::sync::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio;
 use tokio::net::TcpListener;
+use tokio::sync::RwLock;
 use tokio_nbd::device::NbdDriver;
 use tokio_nbd::server::NbdServerBuilder;
 use tokio_nbd::errors::{OptionReplyError, ProtocolError};
@@ -95,7 +95,7 @@ impl NbdDriver for MemoryDriver {
         // Explicit bounds checking is not required.
         // The server checks bounds and returns the appropriate error to the client.
 
-        let data = self.data.read().unwrap();
+        let data = self.data.read().await;
         let start = offset as usize;
         let end = start + length as usize;
 
@@ -111,7 +111,7 @@ impl NbdDriver for MemoryDriver {
         // Explicit bounds checking is not required.
         // The server checks bounds and returns the appropriate error to the client.
 
-        let mut memory = self.data.write().unwrap();
+        let mut memory = self.data.write().await;
         let start = offset as usize;
         let end = start + data.len();
 
