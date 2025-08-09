@@ -4,6 +4,7 @@
 //!
 //! - [`NbdDriver`]: A trait for implementing storage backends
 //! - [`NbdServer`]: A server implementation that handles the NBD protocol
+//! - [`NbdServerBuilder`]: A builder for creating NBD server instances
 //!
 //! The NBD protocol enables remote access to block devices over a network connection.
 //! It consists of two phases:
@@ -17,8 +18,8 @@
 //! To create an NBD server:
 //!
 //! 1. Implement the [`NbdDriver`] trait for your storage backend
-//! 2. Create an instance of [`NbdServer`] with your driver
-//! 3. Call `start()` with a TcpStream to begin serving
+//! 2. Create an instance of [`NbdServer`] using [`NbdServerBuilder`]
+//! 3. Await on `listen()` to start the server
 //!
 //! ```rust,compile_fail
 //! use tokio_nbd::device::NbdDriver;
@@ -26,49 +27,33 @@
 //! use tokio_nbd::flags::ServerFeatures;
 //! use tokio_nbd::errors::{ProtocolError, OptionReplyError};
 //! use tokio::net::{TcpListener, TcpStream};
-//! use std::sync::{Arc, RwLock};
+//! use tokio::sync::{Arc, RwLock};
 //!
 //! // Implement a simple in-memory driver
 //! struct MemoryDriver {
 //!     data: RwLock<Vec<u8>>,
 //! }
 //!
-//! // ... implement NbdDriver for MemoryDriver
-//!
-//! async fn start_nbd(host: &str, port: u16, driver: Arc<MemoryDriver>) -> std::io::Result<()> {
-
+//! impl NbdDriver for MemoryDriver {
+//!     // See documentation for NbdDriver for complete example
 //! }
 //!
 //! #[tokio::main]
 //! async fn main() -> std::io::Result<()> {
 //!     // Need signal handling for graceful shutdown in production code
-//!
-//!     let port: u16 = 10809; // Default NBD port
-//!
-//!     println!("Starting NBD server on port {}", port);
 //!     
 //!     // Create a driver with 1MB of storage
-//!     let driver = Arc::new(MemoryDriver {
+//!     let device = MemoryDriver {
 //!         data: RwLock::new(vec![0; 1024 * 1024]),
-//!     });
-//!     let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
-//!     println!("NBD server listening on {}:{}", host, port);
+//!     };
 //!
-//!     loop {
-//!         let (stream, addr) = listener.accept().await?;
-//!         println!("NBD client connected from {}", addr);
+//!     NbdServerBuilder::builder()
+//!         .devices(vec![device])
+//!         .host("127.0.0.1")
+//!         .build()
+//!         .listen().await?;
 //!
-//!         let driver = Arc::clone(&driver);
-//!
-//!         tokio::spawn(async move {
-//!             let server = NbdServer::new(driver);
-//!
-//!             if let Err(e) = server.start(stream).await {
-//!                 println!("Error starting NBD server: {:?}", e);
-//!                 return;
-//!             }
-//!         });
-//!     }
+//!     Ok(())
 //! }
 //! ```
 //!
