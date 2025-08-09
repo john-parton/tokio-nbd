@@ -26,16 +26,20 @@ Add `tokio-nbd` to your `Cargo.toml` using `cargo add tokio-nbd`
 
 ```rust
 use std::sync::RwLock;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio;
+use tokio::net::TcpListener;
 use tokio_nbd::device::NbdDriver;
-use tokio_nbd::server::NbdServer;
+use tokio_nbd::server::NbdServerBuilder;
 use tokio_nbd::errors::{OptionReplyError, ProtocolError};
 use tokio_nbd::flags::{CommandFlags, ServerFeatures};
 
 
 #[derive(Debug)]
 pub(crate) struct MemoryDriver {
+    size: AtomicU64,
     data: RwLock<Vec<u8>>,
     read_only: bool,
     name: String,
@@ -44,9 +48,10 @@ pub(crate) struct MemoryDriver {
 impl Default for MemoryDriver {
     fn default() -> Self {
         MemoryDriver {
-            data: RwLock::new(vec![0; 1024]), // 1KB of zeroed memory for tests
+            size: AtomicU64::new(1024), // 1KB of storage
+            data: RwLock::new(vec![0; 1024]), // 1KB of zeroed memory
             read_only: false,
-            name: "".to_string(),
+            name: "memory".to_string(),
         }
     }
 }
@@ -54,7 +59,7 @@ impl Default for MemoryDriver {
 impl NbdDriver for MemoryDriver {
     fn get_features(&self) -> ServerFeatures {
         // Support basic read/write operations but not advanced features
-        ServerFeatures::SEND_FUA
+        ServerFeatures::SEND_FUA | ServerFeatures::SEND_FLUSH
     }
 
     fn get_name(&self) -> String {
@@ -77,8 +82,8 @@ impl NbdDriver for MemoryDriver {
         Err(OptionReplyError::Unsupported)
     }
 
-    async fn get_device_size(&self) -> Result<u64, OptionReplyError> {
-        Ok(self.data.read().unwrap().len() as u64)
+    fn get_device_size(&self) -> &AtomicU64 {
+        &self.size
     }
 
     async fn read(
@@ -87,14 +92,12 @@ impl NbdDriver for MemoryDriver {
         offset: u64,
         length: u32,
     ) -> Result<Vec<u8>, ProtocolError> {
+        // Explicit bounds checking is not required.
+        // The server checks bounds and returns the appropriate error to the client.
+
         let data = self.data.read().unwrap();
         let start = offset as usize;
         let end = start + length as usize;
-
-        // Check if read is within bounds
-        if start >= data.len() || (length > 0 && end > data.len()) {
-            return Err(ProtocolError::InvalidArgument);
-        }
 
         Ok(data[start..end].to_vec())
     }
@@ -105,57 +108,53 @@ impl NbdDriver for MemoryDriver {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<(), ProtocolError> {
+        // Explicit bounds checking is not required.
+        // The server checks bounds and returns the appropriate error to the client.
+
         let mut memory = self.data.write().unwrap();
         let start = offset as usize;
         let end = start + data.len();
-
-        // Check if write is within bounds
-        if start >= memory.len() || (data.len() > 0 && end > memory.len()) {
-            return Err(ProtocolError::InvalidArgument);
-        }
 
         memory[start..end].copy_from_slice(&data);
         Ok(())
     }
 
     async fn disconnect(&self, _flags: CommandFlags) -> Result<(), ProtocolError> {
+        // Clean up any resources or connections
+        Ok(())
+    }
+
+    // Optional: implement flush to support SEND_FLUSH feature
+    async fn flush(&self, _flags: CommandFlags) -> Result<(), ProtocolError> {
+        // In a real implementation, we would flush data to stable storage
         Ok(())
     }
 
     // Other methods implementation...
 }
 
-async fn start_nbd(host: &str, port: u16, driver: Arc<MemoryDriver>) -> std::io::Result<()> {
-    let listener = TcpListener::bind(format!("{}:{}", host, port)).await?;
-    println!("NBD server listening on {}:{}", host, port);
-
-    loop {
-        let (stream, addr) = listener.accept().await?;
-        println!("NBD client connected from {}", addr);
-
-        let driver = Arc::clone(&driver);
-
-        tokio::spawn(async move {
-            let server = NbdServer::new(driver);
-
-            if let Err(e) = server.start(stream).await {
-                println!("Error starting NBD server: {:?}", e);
-                return;
-            }
-        });
-    }
-}
-
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let port: u16 = 10809; // Default NBD port
+    // Initialize tracing for structured logging
+    tokio_nbd::init_default_tracing();
 
-    // Create a driver with 1MB of storage
-    let driver = Arc::new(MemoryDriver {
-        data: RwLock::new(vec![0; 1024 * 1024]),
-    });
+    // Create a driver with 10MB of storage
+    let device = MemoryDriver {
+        size: AtomicU64::new(10 * 1024 * 1024),
+        data: RwLock::new(vec![0; 10 * 1024 * 1024]),
+        read_only: false,
+        name: "memory".to_string(),
+    };
 
-    start_nbd("127.0.0.1", port, driver).await
+    // Create and run the NBD server with a builder pattern
+    NbdServerBuilder::builder()
+        .devices(vec![device])
+        .host("127.0.0.1")
+        .port(Some(10809)) // Omit for default port
+        .shutdown_timeout(Some(30)) // Omit for default timeout
+        .build()
+        .listen()
+        .await
 }
 ```
 
