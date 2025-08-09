@@ -72,7 +72,6 @@
 //!
 
 use bon::Builder;
-use bon::bon;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -80,8 +79,9 @@ use std::{io, vec};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::signal;
-use tokio::sync::oneshot;
+use tokio::sync::broadcast;
 use tokio::time::sleep;
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::command_request::CommandRequest;
 use crate::device::NbdDriver;
@@ -296,62 +296,57 @@ where
     ///
     /// This method runs indefinitely. To handle graceful shutdown, consider
     /// running it in a separate task and implementing signal handling.
+    #[instrument(name = "nbd_server_listen", skip(self))]
     pub async fn listen(&self) -> std::io::Result<()> {
         let port = self.port.unwrap_or(10809);
         let shutdown_timeout = self.shutdown_timeout.unwrap_or(60); // Default 60 seconds
         let listener = TcpListener::bind(format!("{}:{}", self.host, port)).await?;
 
-        // Create a watch channel for shutdown signaling
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let shutdown_rx = Arc::new(shutdown_rx);
+        // Create a broadcast channel for shutdown signaling
+        // A capacity of 1 is enough since we only need to send one shutdown signal
+        let (shutdown_tx, shutdown_rx) = broadcast::channel::<()>(1);
 
         // Track active connections with a counter
         let active_connections = Arc::new(AtomicUsize::new(0));
 
-        println!("NBD server starting on {}:{}", self.host, port);
+        info!("NBD server starting on {}:{}", self.host, port);
 
         // Keep references for join handles and signal handling
         let connections_counter = Arc::clone(&active_connections);
-
-        // Create a channel to signal the accept loop to stop
-        let (accept_loop_stop_tx, mut accept_loop_stop_rx) = oneshot::channel();
-        let mut accept_loop_stop_tx = Some(accept_loop_stop_tx);
 
         let devices = self.devices.clone();
 
         // Spawn the accept loop
         let handle = tokio::spawn({
-            let rx = shutdown_rx.clone();
+            // Subscribe to the broadcast channel to get our own receiver
+            let mut rx = shutdown_rx.resubscribe();
             async move {
                 loop {
                     // Check if we should stop accepting new connections
-                    if *rx.borrow() {
-                        println!("Server is shutting down, no longer accepting new connections");
-                        break;
-                    }
+                    // We don't need to explicitly check the receiver as we'll use select! later
 
-                    // Use select to either accept a connection or receive shutdown signal
+                    // Use select to either accept a connection or receive shutdown signal through broadcast
                     tokio::select! {
                         accept_result = listener.accept() => {
                             match accept_result {
                                 Ok((stream, addr)) => {
-                                    println!("NBD client connected from {}", addr);
+                                    info!("NBD client connected from {}", addr);
 
                                     // Increment active connections counter
                                     active_connections.fetch_add(1, Ordering::SeqCst);
 
                                     let devices = Arc::clone(&devices);
-                                    let shutdown_signal = Arc::clone(&shutdown_rx);
+                                    // Create a new subscriber for this connection
+                                    let connection_shutdown_rx = shutdown_rx.resubscribe();
                                     let connection_counter = Arc::clone(&active_connections);
                                     let server = NbdServer {
                                         devices,
-                                        shutdown_signal,
+                                        shutdown_rx: connection_shutdown_rx,
                                     };
 
                                     tokio::spawn(async move {
-
                                         if let Err(e) = server.start(stream).await {
-                                            println!("Error in NBD server session: {:?}", e);
+                                            error!("Error in NBD server session: {:?}", e);
                                         }
 
                                         // Decrement connection counter when done
@@ -359,7 +354,7 @@ where
                                     });
                                 }
                                 Err(e) => {
-                                    println!("Failed to accept connection: {}", e);
+                                    error!("Failed to accept connection: {}", e);
                                     if e.kind() == io::ErrorKind::ConnectionAborted {
                                         // This can happen during shutdown, not fatal
                                         continue;
@@ -370,17 +365,11 @@ where
                                 }
                             }
                         }
-                        // We use the oneshot channel for direct shutdown notification
-                        _ = &mut accept_loop_stop_rx => {
-                            println!("Received direct shutdown signal, stopping accept loop");
+                        // Check for broadcast shutdown signal
+                        _ = rx.recv() => {
+                            info!("Received shutdown signal, stopping accept loop");
                             break;
                         }
-                    }
-
-                    // Check for shutdown flag after each iteration
-                    if *rx.borrow() {
-                        println!("Detected shutdown signal, stopping accept loop");
-                        break;
                     }
                 }
             }
@@ -397,36 +386,26 @@ where
         tokio::select! {
             result = handle => {
                 // Accept loop stopped on its own due to an error
-                println!("Accept loop stopped unexpectedly");
+                warn!("Accept loop stopped unexpectedly");
                 result?;
             }
             _ = tokio::signal::ctrl_c() => {
-                println!("Received Ctrl+C signal, initiating graceful shutdown");
-                // Signal shutdown intent
-                let _ = shutdown_tx.send(true);
-                // Stop accepting new connections directly
-                if let Some(tx) = accept_loop_stop_tx.take() {
-                    let _ = tx.send(());
-                }
+                info!("Received Ctrl+C signal, initiating graceful shutdown");
+                // Signal shutdown intent to all server instances
+                let _ = shutdown_tx.send(());
             }
             _ = sigterm.recv() => {
-                println!("Received SIGTERM signal, initiating graceful shutdown");
-                let _ = shutdown_tx.send(true);
-                if let Some(tx) = accept_loop_stop_tx.take() {
-                    let _ = tx.send(());
-                }
+                info!("Received SIGTERM signal, initiating graceful shutdown");
+                let _ = shutdown_tx.send(());
             }
             _ = sighup.recv() => {
-                println!("Received SIGHUP signal, initiating graceful shutdown");
-                let _ = shutdown_tx.send(true);
-                if let Some(tx) = accept_loop_stop_tx.take() {
-                    let _ = tx.send(());
-                }
+                info!("Received SIGHUP signal, initiating graceful shutdown");
+                let _ = shutdown_tx.send(());
             }
         };
 
         // Start the graceful shutdown process
-        println!("Starting graceful shutdown");
+        info!("Starting graceful shutdown");
 
         // Wait for active connections to finish with timeout
         let shutdown_deadline = tokio::time::Instant::now() + Duration::from_secs(shutdown_timeout);
@@ -434,23 +413,23 @@ where
         loop {
             let remaining = connections_counter.load(Ordering::SeqCst);
             if remaining == 0 {
-                println!("All connections closed, shutdown complete");
+                info!("All connections closed, shutdown complete");
                 break;
             }
 
             if tokio::time::Instant::now() >= shutdown_deadline {
-                println!(
+                warn!(
                     "Shutdown timeout reached with {} connections still active",
                     remaining
                 );
                 break;
             }
 
-            println!("Waiting for {} active connections to close...", remaining);
+            debug!("Waiting for {} active connections to close...", remaining);
             sleep(Duration::from_secs(1)).await;
         }
 
-        println!("Server shutdown complete");
+        info!("Server shutdown complete");
         Ok(())
     }
 }
@@ -470,8 +449,8 @@ where
 {
     /// The driver implementation for handling storage operations
     devices: Arc<Vec<T>>,
-    /// Shutdown signal receiver that can be cloned and shared among server instances
-    shutdown_signal: Arc<tokio::sync::watch::Receiver<bool>>,
+    /// Shutdown signal receiver to handle graceful shutdown
+    shutdown_rx: broadcast::Receiver<()>,
 }
 
 impl<T> NbdServer<T>
@@ -518,6 +497,7 @@ where
     /// 1. Perform the initial handshake
     /// 2. Handle option negotiation to select a device
     /// 3. Process commands for the selected device
+    #[instrument(name = "nbd_server_session", skip(self, stream))]
     pub async fn start(&self, stream: TcpStream) -> std::io::Result<()> {
         if self.devices.is_empty() {
             return Err(io::Error::new(
@@ -530,11 +510,11 @@ where
         let mut reader = BufReader::new(reader);
         let mut writer = BufWriter::new(writer);
 
-        dbg!("Starting handshake");
+        debug!("Starting handshake");
         self.handle_handshake(&mut reader, &mut writer).await?;
-        dbg!("Starting options negotiation");
+        debug!("Starting options negotiation");
         let selected_device = self.handle_options(&mut reader, &mut writer).await?;
-        dbg!("Starting command handling");
+        debug!("Starting command handling");
         // Function signature is getting too long
         self.handle_commands(
             &selected_device.device,
@@ -569,6 +549,7 @@ where
     ///
     /// The client responds with its own flags, which must include FIXED_NEWSTYLE
     /// and NO_ZEROES for the negotiation to continue.
+    #[instrument(name = "nbd_handshake", skip(self, reader, writer))]
     async fn handle_handshake<R, W>(&self, reader: &mut R, writer: &mut W) -> std::io::Result<()>
     where
         R: AsyncReadExt + Unpin,
@@ -600,7 +581,7 @@ where
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Invalid client flags"))?;
 
         if !client_flags.contains(HandshakeFlags::FIXED_NEWSTYLE) {
-            dbg!("Client did not send FIXED_NEWSTYLE flag, which is required");
+            error!("Client did not send FIXED_NEWSTYLE flag, which is required");
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Client did not send FIXED_NEWSTYLE flag, which is required",
@@ -608,7 +589,7 @@ where
         }
 
         if !client_flags.contains(HandshakeFlags::NO_ZEROES) {
-            dbg!("Client did not send NO_ZEROES flag, which is required");
+            error!("Client did not send NO_ZEROES flag, which is required");
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Client did not send NO_ZEROES flag, which is required",
@@ -639,6 +620,7 @@ where
     ///    - `Abort`: End the negotiation with an error
     ///    - `Continue`: Keep accepting option requests
     ///    - `End`: Finish negotiation and proceed to command phase
+    #[instrument(name = "nbd_process_option", skip(self), fields(option_type = ?request))]
     async fn handle_option_request(
         &self,
         request: &OptionRequest,
@@ -786,6 +768,7 @@ where
     /// - List available devices
     /// - Query device information (size, read-only status, etc.)
     /// - Select a device for the transmission phase
+    #[instrument(name = "nbd_options_negotiation", skip(self, reader, writer))]
     async fn handle_options<R, W>(
         &self,
         reader: &mut R,
@@ -795,10 +778,30 @@ where
         R: AsyncReadExt + Unpin,
         W: AsyncWrite + Unpin,
     {
-        loop {
-            let request_raw = OptionRequestRaw::read(reader).await?;
+        // Create a new receiver for this method
+        let mut shutdown_rx = self.shutdown_rx.resubscribe();
 
-            dbg!("Received option request, raw");
+        loop {
+            // Use select! to wait for either a new option request or shutdown signal
+            let request_raw = tokio::select! {
+                // Wait for the next option request
+                request_result = OptionRequestRaw::read(reader) => {
+                    match request_result {
+                        Ok(req) => req,
+                        Err(e) => return Err(e),
+                    }
+                },
+                // This will be triggered when a shutdown signal is broadcast
+                _ = shutdown_rx.recv() => {
+                    info!("Server is shutting down, aborting option negotiation");
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "Server is shutting down during option negotiation"
+                    ));
+                }
+            };
+
+            trace!("Received option request, raw");
 
             let request = match OptionRequest::try_from(&request_raw) {
                 Err(e) => {
@@ -810,24 +813,7 @@ where
                 Ok(req) => req,
             };
 
-            // Check to see if server is in shutdown state
-            if *self.shutdown_signal.borrow() {
-                dbg!("Server is shutting down, aborting option negotiation");
-                // Let the client know we've shut down
-                self.write_option_reply_error(
-                    writer,
-                    request_raw.option,
-                    OptionReplyError::Shutdown,
-                )
-                .await?;
-                // Not actually an IO error?
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Server is shutting down",
-                ));
-            }
-
-            dbg!("Parsed option request: {:?}", &request);
+            debug!("Parsed option request: {:?}", &request);
 
             match self.handle_option_request(&request).await {
                 Err(e) => {
@@ -839,7 +825,7 @@ where
                 Ok((responses, finalize)) => {
                     // Continue negotiation, write the responses
                     for response in responses {
-                        dbg!("Writing option reply: {:?}", &response);
+                        trace!("Writing option reply: {:?}", &response);
                         let response_raw = OptionReplyRaw::new(
                             request_raw.option,
                             response.get_reply_type().into(),
@@ -852,18 +838,18 @@ where
 
                     match finalize {
                         OptionReplyFinalize::Abort => {
-                            dbg!("Aborting option negotiation");
+                            info!("Aborting option negotiation");
                             return Err(io::Error::new(
                                 io::ErrorKind::Other,
                                 "Abort request received",
                             ));
                         }
                         OptionReplyFinalize::Continue => {
-                            dbg!("Continuing option negotiation");
+                            debug!("Continuing option negotiation");
                         }
                         OptionReplyFinalize::End(selected_device) => {
-                            dbg!(
-                                "Ending option negotiation with selected device: {:?}",
+                            info!(
+                                "Ending option negotiation with selected device: {}",
                                 &selected_device.name
                             );
                             return Ok(selected_device);
@@ -947,6 +933,7 @@ where
     /// 5. Send the reply back to the client
     ///
     /// This continues until either the client disconnects or an error occurs.
+    #[instrument(name = "nbd_command_handling", skip(self, device, reader, writer), fields(device_name = %device.get_name()))]
     async fn handle_commands<R, W>(
         &self,
         device: &T,
@@ -959,8 +946,31 @@ where
         R: AsyncReadExt + Unpin,
         W: tokio::io::AsyncWrite + Unpin,
     {
+        // Create a new receiver for this method
+        let mut shutdown_rx = self.shutdown_rx.resubscribe();
+
         loop {
-            let command_raw = CommandRequestRaw::read(reader).await?;
+            // Use select to either process a command or handle shutdown
+            let command_raw = tokio::select! {
+                cmd_result = CommandRequestRaw::read(reader) => {
+                    match cmd_result {
+                        Ok(cmd) => cmd,
+                        Err(e) => return Err(e),
+                    }
+                },
+                _ = shutdown_rx.recv() => {
+                    info!("Server is shutting down, aborting command processing");
+                    // Gracefully shutdown device
+                    device
+                        .disconnect(CommandFlags::empty())
+                        .await
+                        .expect("Failed to disconnect");
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        "Server is shutting down during command processing"
+                    ));
+                }
+            };
 
             let cookie = command_raw.cookie;
 
@@ -974,24 +984,6 @@ where
                     continue;
                 }
             };
-
-            // Check if server is shutdown
-            if *self.shutdown_signal.borrow() {
-                dbg!("Server is shutting down, aborting command processing");
-                let reply =
-                    SimpleReplyRaw::new(ProtocolError::ServerShuttingDown.into(), cookie, vec![]);
-                reply.write(writer).await?;
-                writer.flush().await?;
-                // Gracefully shutdown device
-                device
-                    .disconnect(flags)
-                    .await
-                    .expect("Failed to disconnect");
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "Server is shutting down",
-                ));
-            }
 
             // A few edge cases we handle here.
             // For example, a `Write` command with an empty data vector,
@@ -1042,7 +1034,7 @@ where
 
             let (reply, abort) = match result {
                 Err(e) => {
-                    dbg!("Error processing command: {:?}", &e);
+                    error!("Error processing command: {:?}", &e);
                     (
                         SimpleReplyRaw::new(
                             ProtocolError::ServerShuttingDown.into(),
